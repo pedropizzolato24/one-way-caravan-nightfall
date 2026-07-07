@@ -1,22 +1,31 @@
--- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.6)
--- Toda autoridade de HP, recursos, spawn, dano e morte vive AQUI.
+-- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.7)
+-- Toda autoridade de HP, recursos, spawn, dano, morte, rota e votação vive AQUI.
 -- Cliente só envia intenção via RemoteEvents validados e rate-limitados.
+-- Passo 7: grafo de rota (RouteGraph) + zonas em runtime (ZoneBuilder) + travessia NPC-driven em
+-- 3 etapas (doc 4.5) + votação de avanço/permanência com escalada por permanência (doc 5.4).
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local Lighting = game:GetService("Lighting")
 
+local ZoneBuilder = require(script.Parent.ZoneBuilder)
+local RouteGraph = require(script.Parent.RouteGraph)
+
 -- ===== config =====
-local DAY_LENGTH = 90
+local DAY_LENGTH = 90 -- dia completo (só quando o grupo vota ficar, ou no 1º nó)
+local MORNING_LENGTH = 40 -- etapa 1 do dia de viagem: manhã no POI atual antes da caravana partir
 local NIGHT_LENGTH = 120
+local VOTE_LENGTH = 20
+local CARAVAN_SPEED = 9 -- studs/s, fixa (doc 4.5)
 local WAVES = { -- 3 ondas por noite, escalando em contagem
 	{ time = 6, count = 3 },
 	{ time = 45, count = 4 },
 	{ time = 80, count = 5 },
 }
-local WAVE_BONUS_PER_NIGHT = 1 -- +1 inimigo por onda a cada noite no mesmo nó (base p/ escalada por permanência, doc 5.4)
 local WAVE_MAX_COUNT = 8
+-- custo noturno estático por tipo de POI (doc 5.5: todo POI serve dia e noite; dificuldade estática, pilar 4)
+local POI_DIFFICULTY = { estacao = 0, planicie = 0, mina = 1, acampamento = 1, boss = 0 }
 local POOL_SIZE = 24
 local ENEMY_MAX_HP = 75
 local ENEMY_WALKSPEED = 10
@@ -33,9 +42,7 @@ local HEAL_PER_FOOD = 25
 local COLLECT_RANGE = 14
 local PLACE_RANGE = 35
 local DOWNED_HP = 10
-local MAP_LIMIT = 240 -- meio-lado do mapa gerado pelo build_map.lua
-local RIDGE_Z = 30 -- crista do canyon; passagem única em x=0 (funil, doc 5.4)
-local GAP_POS = Vector3.new(0, 3, RIDGE_Z)
+local MAP_LIMIT = 240
 local CAMP_FALLBACK = Vector3.new(0, 3, -47)
 local MAX_HORIZ_SPEED = 60 -- sanity-check anti speed/teleport (doc 4.1); só horizontal p/ não punir queda
 local COSTS = {
@@ -45,7 +52,10 @@ local COSTS = {
 local BARRICADE_HP = 250
 local BARRICADE_COLOR = Color3.fromRGB(140, 100, 50)
 local BARRICADE_COLOR_BROKEN = Color3.fromRGB(70, 45, 25)
-local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5 } -- rate-limit básico (doc 4.1)
+local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Vote = 0.2 } -- doc 4.1
+
+-- zona atual (funil, posições da caravana); preenchida pelo loop da run
+local CurrentZone = nil
 
 -- ===== infraestrutura (cria o que faltar p/ o servidor nunca travar em WaitForChild) =====
 local remotes = RS:FindFirstChild("Remotes")
@@ -69,6 +79,12 @@ local placeRE = ensureRemote("PlaceStructure")
 local eatRE = ensureRemote("EatFood")
 local enemyDiedRE = ensureRemote("EnemyDied")
 local playerDownedRE = ensureRemote("PlayerDowned")
+local voteStartedRE = ensureRemote("VoteStarted")
+local voteCastRE = ensureRemote("VoteCast")
+local voteUpdateRE = ensureRemote("VoteUpdate")
+local voteEndedRE = ensureRemote("VoteEnded")
+local zoneFadeRE = ensureRemote("ZoneFade")
+local announceRE = ensureRemote("Announce")
 
 local function ensureFolder(name)
 	local f = workspace:FindFirstChild(name)
@@ -83,6 +99,19 @@ local resourceNodes = ensureFolder("ResourceNodes")
 local structuresFolder = ensureFolder("Structures")
 local enemiesFolder = ensureFolder("Enemies")
 
+local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+if not atmosphere then
+	atmosphere = Instance.new("Atmosphere")
+	atmosphere.Parent = Lighting
+end
+atmosphere.Density = 0.3
+atmosphere.Haze = 1.6
+
+local function announce(text)
+	announceRE:FireAllClients(text)
+	print("[One Way Caravan: Nightfall] " .. text)
+end
+
 -- acampamento = onde a caravana está (doc 4.5: a caravana é a "base que anda")
 local function campPos()
 	local caravana = workspace:FindFirstChild("Caravana")
@@ -94,6 +123,7 @@ end
 
 -- ===== recursos (contagem 100% server-side; atributo no Player é só espelho p/ UI) =====
 local resources = {} -- [player] = { Wood = n, Food = n }
+local joinOrder = {} -- ordem de entrada; joinOrder[1] = host (desempata votação, doc 5.4)
 
 local function disableNativeRegen(char)
 	-- o script "Health" padrão regenera HP e mascarava o estado Downed; sem ele, comida vira a fonte de cura
@@ -108,6 +138,7 @@ end
 local function initPlayer(plr)
 	if resources[plr] then return end
 	resources[plr] = { Wood = 0, Food = 0 }
+	table.insert(joinOrder, plr)
 	plr:SetAttribute("Wood", 0)
 	plr:SetAttribute("Food", 0)
 	plr:SetAttribute("Downed", false)
@@ -153,9 +184,13 @@ Players.PlayerRemoving:Connect(function(plr)
 	resources[plr] = nil
 	lastCall[plr] = nil
 	lastPos[plr] = nil
+	local i = table.find(joinOrder, plr)
+	if i then
+		table.remove(joinOrder, i)
+	end
 end)
 
--- ===== anti speed/teleport básico (doc 4.1): desloc. horizontal > MAX_HORIZ_SPEED studs/s volta o jogador =====
+-- ===== anti speed/teleport básico (doc 4.1) =====
 task.spawn(function()
 	while true do
 		task.wait(1)
@@ -181,6 +216,21 @@ task.spawn(function()
 		end
 	end
 end)
+
+-- teleporte legítimo do servidor (trocas de zona): reseta o rastreio anti-teleport junto
+local function teleportPlayersBehindCaravana()
+	local caravana = workspace:FindFirstChild("Caravana")
+	local base = caravana and caravana:GetPivot() or CFrame.new(CAMP_FALLBACK)
+	local i = 0
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local char = plr.Character
+		if char then
+			char:PivotTo(base * CFrame.new(-6 + (i % 4) * 4, 1.5, -12 - math.floor(i / 4) * 4))
+			lastPos[plr] = nil
+			i += 1
+		end
+	end
+end
 
 -- ===== pool de inimigos (doc 4.7: object pooling obrigatório, nunca Instantiate/Destroy por onda) =====
 local poolFolder = Instance.new("Folder")
@@ -401,12 +451,11 @@ local function tryAttackBarricade(e, barr)
 	barr:SetAttribute("HP", hp)
 	local body = barr.PrimaryPart
 	if body then
-		-- feedback visual: escurece conforme apanha
 		body.Color = BARRICADE_COLOR_BROKEN:Lerp(BARRICADE_COLOR, math.clamp(hp / maxHp, 0, 1))
 	end
 	if hp <= 0 then
 		print("[One Way Caravan: Nightfall] Barricada destruida — caminho aberto")
-		barr:Destroy() -- doc Seção 2: sem fortificação, barricada destruída some (pooling é só p/ inimigos)
+		barr:Destroy() -- doc Seção 2: sem fortificação, barricada destruída some
 	end
 end
 
@@ -429,14 +478,17 @@ local function stepEnemy(e)
 	local targetHrp = nearestTarget(hrp.Position)
 	local targetPos = targetHrp and targetHrp.Position or campPos()
 
-	-- funil do canyon: se a linha reta até o alvo cruza a crista fora da passagem, mira a passagem primeiro
+	-- funil do canyon (se a zona tiver um): linha reta cruza a crista fora da passagem -> mira a passagem
 	local desired = targetPos
-	local ez, tz = hrp.Position.Z, targetPos.Z
-	if (ez - RIDGE_Z) * (tz - RIDGE_Z) < 0 then
-		local t = (RIDGE_Z - ez) / (tz - ez)
-		local xCross = hrp.Position.X + (targetPos.X - hrp.Position.X) * t
-		if math.abs(xCross) > 4 then
-			desired = GAP_POS
+	local ridgeZ = CurrentZone and CurrentZone.ridgeZ
+	if ridgeZ then
+		local ez, tz = hrp.Position.Z, targetPos.Z
+		if (ez - ridgeZ) * (tz - ridgeZ) < 0 then
+			local t = (ridgeZ - ez) / (tz - ez)
+			local xCross = hrp.Position.X + (targetPos.X - hrp.Position.X) * t
+			if math.abs(xCross) > 4 then
+				desired = CurrentZone.gapPos
+			end
 		end
 	end
 
@@ -627,19 +679,33 @@ eatRE.OnServerEvent:Connect(function(plr)
 	hum.Health = math.min(hum.MaxHealth, hum.Health + HEAL_PER_FOOD)
 end)
 
--- ===== ciclo dia/noite =====
-local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+-- ===== votação de avanço/permanência (doc 5.4) =====
+local currentVote = nil -- { valid = {id=label}, votes = {[player]=id} }
 
+voteCastRE.OnServerEvent:Connect(function(plr, id)
+	if not rateOk(plr, "Vote") then return end
+	if not currentVote then return end
+	if type(id) ~= "string" or not currentVote.valid[id] then return end
+	currentVote.votes[plr] = id
+	local counts = {}
+	for vid in pairs(currentVote.valid) do counts[vid] = 0 end
+	for p, v in pairs(currentVote.votes) do
+		if p.Parent then counts[v] += 1 end
+	end
+	voteUpdateRE:FireAllClients(counts)
+end)
+
+-- ===== ambiente / fases =====
 local function applyDayAmbience()
 	Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
 	Lighting.Brightness = 2
-	if atmosphere then atmosphere.Density = 0.3 end
+	atmosphere.Density = 0.3
 end
 
 local function applyNightAmbience()
 	Lighting.OutdoorAmbient = Color3.fromRGB(90, 95, 128)
 	Lighting.Brightness = 1
-	if atmosphere then atmosphere.Density = 0.42 end
+	atmosphere.Density = 0.42
 end
 
 local function transitionClock(from, to, dur)
@@ -650,8 +716,15 @@ local function transitionClock(from, to, dur)
 	end
 end
 
+local function phaseCountdown(seconds)
+	for t = math.ceil(seconds), 1, -1 do
+		RS:SetAttribute("PhaseTimeLeft", t)
+		task.wait(1)
+	end
+end
+
 local function respawnResources()
-	-- novo dia = nós de recurso repõem (suporta ficar mais noites no mesmo nó, doc 5.4)
+	-- novo dia no mesmo nó = recursos repõem (suporta a permanência do doc 5.4)
 	for _, node in ipairs(resourceNodes:GetDescendants()) do
 		if node:GetAttribute("NodeType") then
 			node:SetAttribute("Uses", node:GetAttribute("MaxUses") or node:GetAttribute("Uses") or 0)
@@ -663,43 +736,189 @@ local function respawnResources()
 	end
 end
 
-task.spawn(function()
-	local cycle = 1
-	Lighting.ClockTime = 12
+local nightCount = 0
+
+local function nightPhase(waveBonus)
+	nightCount += 1
+	RS:SetAttribute("Cycle", nightCount)
+	RS:SetAttribute("Phase", "Noite")
+	applyNightAmbience()
+	transitionClock(12, 24, 5)
+	print("[One Way Caravan: Nightfall] === NOITE " .. nightCount .. " (bônus de onda: " .. waveBonus .. ") ===")
+	local waveIdx = 1
+	local t0 = os.clock()
 	while true do
-		RS:SetAttribute("Phase", "Dia")
-		RS:SetAttribute("Cycle", cycle)
-		applyDayAmbience()
-		if cycle > 1 then
-			transitionClock(0, 12, 5) -- amanhecer
+		local elapsed = os.clock() - t0
+		if elapsed >= NIGHT_LENGTH then break end
+		RS:SetAttribute("PhaseTimeLeft", math.ceil(NIGHT_LENGTH - elapsed))
+		if waveIdx <= #WAVES and elapsed >= WAVES[waveIdx].time then
+			local count = math.clamp(WAVES[waveIdx].count + waveBonus, 1, WAVE_MAX_COUNT)
+			spawnWave(waveIdx, count)
+			waveIdx += 1
+		end
+		task.wait(0.5)
+	end
+	despawnAll()
+end
+
+local function fullDay(skipDawn)
+	RS:SetAttribute("Phase", "Dia")
+	applyDayAmbience()
+	if skipDawn then
+		Lighting.ClockTime = 12
+	else
+		transitionClock(0, 12, 5)
+	end
+	respawnResources()
+	print("[One Way Caravan: Nightfall] === DIA (noites sobrevividas: " .. nightCount .. ") ===")
+	phaseCountdown(DAY_LENGTH)
+end
+
+local function runVote(node, graph)
+	local options = { { id = "stay", label = "Ficar mais uma noite" } }
+	for _, cid in ipairs(node.children) do
+		local c = graph.nodes[cid]
+		local tag = c.tag and (" — rota " .. c.tag) or ""
+		table.insert(options, { id = cid, label = "Avançar: " .. c.label .. tag })
+	end
+	local valid = {}
+	for _, o in ipairs(options) do
+		valid[o.id] = o.label
+	end
+	currentVote = { valid = valid, votes = {} }
+	RS:SetAttribute("Phase", "Votação")
+	voteStartedRE:FireAllClients(options, VOTE_LENGTH)
+	announce("Enquanto o grupo dorme: avançar ou ficar? (maioria decide; host desempata; sem votos, avança)")
+	phaseCountdown(VOTE_LENGTH)
+
+	-- apuração: maioria simples; empate → voto do host; host ausente/sem voto → default avançar (doc 5.4)
+	local counts = {}
+	for _, o in ipairs(options) do counts[o.id] = 0 end
+	for p, v in pairs(currentVote.votes) do
+		if p.Parent and counts[v] then counts[v] += 1 end
+	end
+	local bestN = -1
+	local tied = {}
+	for _, o in ipairs(options) do
+		local n = counts[o.id]
+		if n > bestN then
+			bestN = n
+			tied = { o.id }
+		elseif n == bestN then
+			table.insert(tied, o.id)
+		end
+	end
+	local decision
+	if bestN > 0 and #tied == 1 then
+		decision = tied[1]
+	else
+		local host = joinOrder[1]
+		local hostVote = host and currentVote.votes[host]
+		if hostVote and (bestN == 0 or table.find(tied, hostVote)) then
+			decision = hostVote
 		else
-			Lighting.ClockTime = 12
+			decision = options[2] and options[2].id or "stay"
 		end
-		respawnResources()
-		print("[One Way Caravan: Nightfall] === DIA " .. cycle .. " ===")
-		for t = DAY_LENGTH, 1, -1 do
-			RS:SetAttribute("PhaseTimeLeft", t)
-			task.wait(1)
+	end
+	voteEndedRE:FireAllClients(valid[decision])
+	currentVote = nil
+	return decision
+end
+
+-- ===== travessia NPC-driven em 3 etapas (doc 4.5) =====
+local function swapZone(buildFn)
+	zoneFadeRE:FireAllClients(true)
+	task.wait(0.7)
+	local info = buildFn()
+	CurrentZone = info
+	return info
+end
+
+local function travelTo(node)
+	-- Etapa 1: manhã no POI atual; a caravana "acorda" e sai sozinha
+	RS:SetAttribute("Phase", "Manhã")
+	applyDayAmbience()
+	transitionClock(0, 10, 5)
+	announce("Amanheceu. A caravana parte em " .. MORNING_LENGTH .. "s — juntem o que puderem!")
+	phaseCountdown(MORNING_LENGTH)
+
+	-- abre caminho: estruturas plantadas na estrada são desmontadas antes da caravana passar
+	for _, s in ipairs(structuresFolder:GetChildren()) do
+		local pp = s.PrimaryPart
+		if pp and math.abs(pp.Position.X) < 8 then
+			s:Destroy()
 		end
-		RS:SetAttribute("Phase", "Noite")
-		applyNightAmbience()
-		transitionClock(12, 24, 5) -- anoitecer
-		print("[One Way Caravan: Nightfall] === NOITE " .. cycle .. " ===")
-		local waveIdx = 1
-		local t0 = os.clock()
-		while true do
-			local elapsed = os.clock() - t0
-			if elapsed >= NIGHT_LENGTH then break end
-			RS:SetAttribute("PhaseTimeLeft", math.ceil(NIGHT_LENGTH - elapsed))
-			if waveIdx <= #WAVES and elapsed >= WAVES[waveIdx].time then
-				local count = math.min(WAVES[waveIdx].count + (cycle - 1) * WAVE_BONUS_PER_NIGHT, WAVE_MAX_COUNT)
-				spawnWave(waveIdx, count)
-				waveIdx += 1
+	end
+	announce("A caravana está partindo! Sigam-na pela passagem norte.")
+	RS:SetAttribute("Phase", "Partida")
+	phaseCountdown(ZoneBuilder.tweenCaravanaTo(CurrentZone.exitCf, CARAVAN_SPEED))
+	task.wait(0.5)
+
+	-- Etapa 2: zona de transição (corredor isolado; caravana em linha reta, jogadores ao redor)
+	local trans = swapZone(ZoneBuilder.buildTransition)
+	ZoneBuilder.pivotCaravanaTo(trans.startCf)
+	teleportPlayersBehindCaravana()
+	zoneFadeRE:FireAllClients(false)
+	RS:SetAttribute("NodeName", "A Caminho...")
+	RS:SetAttribute("Phase", "Travessia")
+	announce("Zona de travessia — acompanhem a caravana até o outro lado.")
+	phaseCountdown(ZoneBuilder.tweenCaravanaTo(trans.endCf, CARAVAN_SPEED))
+	task.wait(0.5)
+
+	-- Etapa 3: próximo POI; caravana anda até o meio do mapa e é quando a noite cai (doc 4.5)
+	swapZone(function()
+		return ZoneBuilder.buildPOI(node.kind)
+	end)
+	ZoneBuilder.pivotCaravanaTo(CurrentZone.entryCf)
+	teleportPlayersBehindCaravana()
+	zoneFadeRE:FireAllClients(false)
+	RS:SetAttribute("NodeName", node.label)
+	RS:SetAttribute("Phase", "Chegada")
+	announce("Chegando: " .. node.label .. ". Quando a caravana parar, a noite cai.")
+	phaseCountdown(ZoneBuilder.tweenCaravanaTo(CurrentZone.campCf, CARAVAN_SPEED))
+	task.wait(0.5)
+end
+
+-- ===== loop da run =====
+task.spawn(function()
+	ZoneBuilder.buildCaravana()
+	local graph = RouteGraph.generate()
+	local node = graph.nodes[graph.currentId]
+	CurrentZone = ZoneBuilder.buildPOI(node.kind)
+	ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
+	RS:SetAttribute("NodeName", node.label)
+	RS:SetAttribute("Cycle", 0)
+	RS:SetAttribute("EnemiesAlive", 0)
+	task.wait(1)
+	teleportPlayersBehindCaravana()
+
+	local stays = 0 -- noites extras consecutivas neste POI (doc 5.4: reseta ao avançar)
+	local needFullDay = true
+	local skipDawn = true
+	while true do
+		if needFullDay then
+			fullDay(skipDawn)
+			skipDawn = false
+		end
+		nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
+		local decision = runVote(node, graph)
+		if decision == "stay" then
+			stays += 1
+			needFullDay = true
+			announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
+		else
+			stays = 0
+			node = graph.nodes[decision]
+			graph.currentId = decision
+			travelTo(node)
+			if node.kind == "boss" then
+				RS:SetAttribute("Phase", "FimDaRota")
+				RS:SetAttribute("PhaseTimeLeft", 0)
+				announce("Vocês chegaram ao " .. node.label .. "! O boss e o fim de run entram no passo 8 do build.")
+				break
 			end
-			task.wait(0.5)
+			needFullDay = false -- a noite cai na chegada (doc 4.5, etapa 3)
 		end
-		despawnAll()
-		cycle += 1
 	end
 end)
 

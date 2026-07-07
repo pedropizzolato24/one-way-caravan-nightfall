@@ -6,6 +6,12 @@
       "$className": "ServerScriptService",
       "OneWayCaravanNightfallServer": {
         "$path": "src/ServerScriptService/OneWayCaravanNightfallServer.server.lua"
+      },
+      "ZoneBuilder": {
+        "$path": "src/ServerScriptService/ZoneBuilder.lua"
+      },
+      "RouteGraph": {
+        "$path": "src/ServerScriptService/RouteGraph.lua"
       }
     },
     "StarterPlayer": {
