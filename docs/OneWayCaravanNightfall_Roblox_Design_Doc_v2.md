@@ -1,4 +1,4 @@
-# Friendslop (Roblox) — Documento de Design + Plano de Build (v2)
+# One Way Caravan: Nightfall (Roblox) — Documento de Design + Plano de Build (v2)
 
 *Documento vivo. A v1 era um doc de design puro. Esta v2 adiciona as camadas que faltavam pra começar a desenvolver: arquitetura técnica, corte de MVP e ordem de build. As decisões de design travadas foram preservadas; as justificativas longas foram comprimidas.*
 

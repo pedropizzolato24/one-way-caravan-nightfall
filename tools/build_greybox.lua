@@ -1,6 +1,6 @@
 -- Reconstrói o grey-box do nó MVP num place vazio (rodar na Command Bar do Studio, modo Edit).
 -- Cria: mapa/funil, árvores, arbustos, pastas, Remotes e a Tool Machado (com Handle).
--- Os scripts (FriendslopServer/FriendslopClient/WeaponClient) são sincronizados via Rojo,
+-- Os scripts (OneWayCaravanNightfallServer/OneWayCaravanNightfallClient/WeaponClient) são sincronizados via Rojo,
 -- exceto o WeaponClient que deve ser colado dentro da Tool Machado criada aqui.
 
 -- limpeza idempotente de builds anteriores
@@ -114,4 +114,4 @@ tool.Parent = game.StarterPack
 
 game.Lighting.ClockTime = 12
 
-print("[Friendslop] Grey-box reconstruído: mapa, recursos, remotes e Machado prontos")
+print("[One Way Caravan: Nightfall] Grey-box reconstruído: mapa, recursos, remotes e Machado prontos")

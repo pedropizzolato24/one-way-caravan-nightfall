@@ -1,19 +1,19 @@
 {
-  "name": "friendslop",
+  "name": "one-way-caravan-nightfall",
   "tree": {
     "$className": "DataModel",
     "ServerScriptService": {
       "$className": "ServerScriptService",
-      "FriendslopServer": {
-        "$path": "src/ServerScriptService/FriendslopServer.server.lua"
+      "OneWayCaravanNightfallServer": {
+        "$path": "src/ServerScriptService/OneWayCaravanNightfallServer.server.lua"
       }
     },
     "StarterPlayer": {
       "$className": "StarterPlayer",
       "StarterPlayerScripts": {
         "$className": "StarterPlayerScripts",
-        "FriendslopClient": {
-          "$path": "src/StarterPlayer/StarterPlayerScripts/FriendslopClient.client.lua"
+        "OneWayCaravanNightfallClient": {
+          "$path": "src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua"
         }
       }
     }
