@@ -1,4 +1,4 @@
--- Friendslop MVP — servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.6)
+-- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.6)
 -- Toda autoridade de HP, recursos, spawn, dano e morte vive AQUI.
 -- Cliente só envia intenção via RemoteEvents validados e rate-limitados.
 
@@ -142,7 +142,7 @@ for i = 1, POOL_SIZE do
 	makeEnemyRig("Enemy" .. i).Parent = poolFolder
 end
 poolFolder:SetAttribute("TotalCreated", POOL_SIZE)
-print("[Friendslop] Pool de inimigos criado: " .. POOL_SIZE .. " instancias (criadas 1x no boot, reusadas entre ondas)")
+print("[One Way Caravan: Nightfall] Pool de inimigos criado: " .. POOL_SIZE .. " instancias (criadas 1x no boot, reusadas entre ondas)")
 
 local function countActive()
 	local n = 0
@@ -171,7 +171,7 @@ end
 local function returnToPool(e)
 	activeEnemies[e] = nil
 	e.Parent = poolFolder
-	print("[Friendslop] " .. e.Name .. " retornou ao pool")
+	print("[One Way Caravan: Nightfall] " .. e.Name .. " retornou ao pool")
 end
 
 local function despawnAll()
@@ -183,7 +183,7 @@ local function despawnAll()
 		returnToPool(e)
 	end
 	if #list > 0 then
-		print("[Friendslop] Amanheceu: " .. #list .. " inimigos retornaram ao pool")
+		print("[One Way Caravan: Nightfall] Amanheceu: " .. #list .. " inimigos retornaram ao pool")
 	end
 end
 
@@ -192,19 +192,19 @@ local function spawnWave(waveIdx, count)
 	for i = 1, count do
 		local e = poolFolder:FindFirstChildOfClass("Model")
 		if not e then
-			print("[Friendslop] Pool esgotado; onda " .. waveIdx .. " parcial")
+			print("[One Way Caravan: Nightfall] Pool esgotado; onda " .. waveIdx .. " parcial")
 			break
 		end
 		activateEnemy(e, i)
 		spawned += 1
 	end
-	print(string.format("[Friendslop] Onda %d: %d inimigos ativados do pool (pool restante: %d, ativos: %d)", waveIdx, spawned, #poolFolder:GetChildren(), countActive()))
+	print(string.format("[One Way Caravan: Nightfall] Onda %d: %d inimigos ativados do pool (pool restante: %d, ativos: %d)", waveIdx, spawned, #poolFolder:GetChildren(), countActive()))
 end
 
 -- ===== morte de inimigo =====
 local function killEnemy(e, byPlr)
 	remotes.EnemyDied:FireAllClients(e.Name)
-	print("[Friendslop] " .. e.Name .. " morreu" .. (byPlr and (" (por " .. byPlr.Name .. ")") or ""))
+	print("[One Way Caravan: Nightfall] " .. e.Name .. " morreu" .. (byPlr and (" (por " .. byPlr.Name .. ")") or ""))
 	returnToPool(e)
 end
 
@@ -216,7 +216,7 @@ local function revive(plr, char, hum, prompt)
 	hum.JumpPower = 50
 	hum.PlatformStand = false
 	if prompt then prompt:Destroy() end
-	print("[Friendslop] " .. plr.Name .. " foi reanimado")
+	print("[One Way Caravan: Nightfall] " .. plr.Name .. " foi reanimado")
 end
 
 local function makeDowned(plr, char, hum)
@@ -242,7 +242,7 @@ local function makeDowned(plr, char, hum)
 		end
 	end)
 	remotes.PlayerDowned:FireAllClients(plr.Name)
-	print("[Friendslop] " .. plr.Name .. " caiu — segure o botão de reviver por perto")
+	print("[One Way Caravan: Nightfall] " .. plr.Name .. " caiu — segure o botão de reviver por perto")
 end
 
 -- ===== IA de inimigo (doc 4.8: alvo = jogador vivo mais próximo, repath com throttle) =====
@@ -291,7 +291,7 @@ local function tryAttackBarricade(e, barr)
 	local hp = (barr:GetAttribute("HP") or 0) - ENEMY_DMG_BARRICADE
 	barr:SetAttribute("HP", hp)
 	if hp <= 0 then
-		print("[Friendslop] Barricada destruida — caminho aberto")
+		print("[One Way Caravan: Nightfall] Barricada destruida — caminho aberto")
 		barr:Destroy() -- doc Seção 2: sem fortificação, barricada destruída some (pooling é só p/ inimigos)
 	end
 end
@@ -455,7 +455,7 @@ remotes.PlaceStructure.OnServerEvent:Connect(function(plr, structType, pos)
 		plr:SetAttribute(kind, r[kind])
 	end
 	buildStructure(structType, Vector3.new(pos.X, 0, pos.Z))
-	print("[Friendslop] " .. plr.Name .. " construiu " .. structType)
+	print("[One Way Caravan: Nightfall] " .. plr.Name .. " construiu " .. structType)
 end)
 
 -- ===== ciclo dia/noite =====
@@ -465,14 +465,14 @@ task.spawn(function()
 		RS:SetAttribute("Phase", "Dia")
 		RS:SetAttribute("Cycle", cycle)
 		Lighting.ClockTime = 12
-		print("[Friendslop] === DIA " .. cycle .. " ===")
+		print("[One Way Caravan: Nightfall] === DIA " .. cycle .. " ===")
 		for t = DAY_LENGTH, 1, -1 do
 			RS:SetAttribute("PhaseTimeLeft", t)
 			task.wait(1)
 		end
 		RS:SetAttribute("Phase", "Noite")
 		Lighting.ClockTime = 0
-		print("[Friendslop] === NOITE " .. cycle .. " ===")
+		print("[One Way Caravan: Nightfall] === NOITE " .. cycle .. " ===")
 		local waveIdx = 1
 		local t0 = os.clock()
 		while true do
@@ -490,4 +490,4 @@ task.spawn(function()
 	end
 end)
 
-print("[Friendslop] Servidor inicializado")
+print("[One Way Caravan: Nightfall] Servidor inicializado")

@@ -1,4 +1,4 @@
--- Friendslop MVP — cliente: input + UI. Nenhuma autoridade aqui (doc 4.1).
+-- One Way Caravan: Nightfall — MVP cliente: input + UI. Nenhuma autoridade aqui (doc 4.1).
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 
@@ -10,7 +10,7 @@ local mouse = plr:GetMouse()
 
 -- ===== HUD =====
 local gui = Instance.new("ScreenGui")
-gui.Name = "FriendslopHUD"
+gui.Name = "OneWayCaravanNightfallHUD"
 gui.ResetOnSpawn = false
 gui.Parent = plr:WaitForChild("PlayerGui")
 
