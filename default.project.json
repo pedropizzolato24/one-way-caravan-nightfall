@@ -1,0 +1,21 @@
+{
+  "name": "friendslop",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "FriendslopServer": {
+        "$path": "src/ServerScriptService/FriendslopServer.server.lua"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "FriendslopClient": {
+          "$path": "src/StarterPlayer/StarterPlayerScripts/FriendslopClient.client.lua"
+        }
+      }
+    }
+  }
+}
