@@ -355,6 +355,62 @@ function ZoneBuilder.buildTransition()
 	}
 end
 
+-- ===== lobby (passo 9): posto de partida com catálogo; zona pequena e segura, sem funil e sem inimigos =====
+function ZoneBuilder.buildLobby()
+	clearZone()
+
+	terrain:FillBlock(CFrame.new(0, -6, 0), Vector3.new(160, 12, 160), Enum.Material.Grass)
+	replaceGround(Vector3.new(-26, -10, -26), Vector3.new(26, 4, 34), Enum.Material.Grass, Enum.Material.Ground)
+	-- muros de pedra fechando o posto
+	terrain:FillBlock(CFrame.new(0, 6, 76), Vector3.new(176, 28, 16), Enum.Material.Rock)
+	terrain:FillBlock(CFrame.new(0, 6, -76), Vector3.new(176, 28, 16), Enum.Material.Rock)
+	terrain:FillBlock(CFrame.new(76, 6, 0), Vector3.new(16, 28, 176), Enum.Material.Rock)
+	terrain:FillBlock(CFrame.new(-76, 6, 0), Vector3.new(16, 28, 176), Enum.Material.Rock)
+
+	local mapa = Instance.new("Model")
+	mapa.Name = "Mapa"
+	mapa.Parent = workspace
+
+	-- fogueira permanente do posto
+	for k = 1, 6 do
+		local ang = (k / 6) * math.pi * 2
+		mkPart("PedraFogueira" .. k, Vector3.new(1.2, 0.9, 1.1),
+			Vector3.new(16 + math.cos(ang) * 2.4, 0.4, -8 + math.sin(ang) * 2.4), ROCK_COLOR, mapa)
+	end
+	local flame = mkPart("FogoPosto", Vector3.new(1.8, 1.8, 1.8), Vector3.new(16, 1.2, -8), Color3.fromRGB(255, 140, 30),
+		mapa, { Shape = Enum.PartType.Ball, Material = Enum.Material.Neon, CanCollide = false })
+	local fire = Instance.new("Fire")
+	fire.Size = 5
+	fire.Parent = flame
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(255, 160, 60)
+	light.Range = 20
+	light.Parent = flame
+
+	-- poste de partida na frente da caravana (o servidor pluga o ProximityPrompt nele)
+	local post = mkPart("PostePartida", Vector3.new(1, 6, 1), Vector3.new(6, 3, 26), Color3.fromRGB(110, 80, 48), mapa,
+		{ Material = Enum.Material.Wood })
+	mkPart("BandeiraPartida", Vector3.new(2.6, 1.4, 0.2), Vector3.new(7.4, 5.2, 26), Color3.fromRGB(190, 70, 55), mapa,
+		{ Material = Enum.Material.Fabric, CanCollide = false })
+
+	-- quadro do catálogo perto do spawn (a UI do catálogo abre sozinha no lobby)
+	mkPart("QuadroCatalogo", Vector3.new(5, 3.4, 0.5), Vector3.new(-16, 3, 2), Color3.fromRGB(96, 70, 44), mapa,
+		{ Material = Enum.Material.WoodPlanks })
+	mkPart("QuadroPernaOeste", Vector3.new(0.5, 3, 0.5), Vector3.new(-18, 1.5, 2), Color3.fromRGB(80, 58, 36), mapa,
+		{ Material = Enum.Material.Wood })
+	mkPart("QuadroPernaLeste", Vector3.new(0.5, 3, 0.5), Vector3.new(-14, 1.5, 2), Color3.fromRGB(80, 58, 36), mapa,
+		{ Material = Enum.Material.Wood })
+
+	moveSpawnLocation(Vector3.new(-14, 0.5, -12))
+
+	return {
+		kind = "lobby",
+		caravanaCf = CFrame.new(0, CARAVAN_Y, 6),
+		startPost = post,
+		ridgeZ = nil,
+	}
+end
+
 -- ===== caravana (doc 4.5): Root ancorado + partes soldadas; mover o Root move o conjunto =====
 function ZoneBuilder.buildCaravana()
 	local existing = workspace:FindFirstChild("Caravana")

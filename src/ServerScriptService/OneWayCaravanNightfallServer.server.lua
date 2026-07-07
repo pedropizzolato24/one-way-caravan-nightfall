@@ -11,6 +11,7 @@ local Lighting = game:GetService("Lighting")
 
 local ZoneBuilder = require(script.Parent.ZoneBuilder)
 local RouteGraph = require(script.Parent.RouteGraph)
+local ProfileManager = require(script.Parent.ProfileManager)
 
 -- ===== config =====
 local DAY_LENGTH = 90 -- dia completo (só quando o grupo vota ficar, ou no 1º nó)
@@ -46,7 +47,7 @@ local BOSS_ADDS_COUNT = 3
 -- economia de run (doc 5.8: recompensa fixa e igual ao grupo por evento compartilhado; valores de exemplo do doc)
 local NIGHT_REWARD = 10
 local BOSS_REWARD = 20
-local RUN_RESTART_DELAY = 15 -- fim de run -> nova run (no jogo real, volta pro lobby; passo 9)
+local RUN_RESTART_DELAY = 15 -- tela de fim de run antes de voltar pro lobby
 local WEAPON_DMG = 25
 local WEAPON_RANGE = 10
 local WOOD_PER_COLLECT = 2
@@ -61,11 +62,18 @@ local MAX_HORIZ_SPEED = 60 -- sanity-check anti speed/teleport (doc 4.1); só ho
 local COSTS = {
 	Fogueira = { Wood = 5 },
 	Barricada = { Wood = 10 },
+	BarricadaReforcada = { Wood = 16 }, -- sidegrade (doc 5.2): aguenta mais, custa mais
 }
 local BARRICADE_HP = 250
+local BARRICADE_REINFORCED_HP = 400
 local BARRICADE_COLOR = Color3.fromRGB(140, 100, 50)
+local BARRICADE_REINFORCED_COLOR = Color3.fromRGB(96, 84, 70)
 local BARRICADE_COLOR_BROKEN = Color3.fromRGB(70, 45, 25)
-local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Vote = 0.2 } -- doc 4.1
+-- catálogo lateral (doc 5.2: plano, sem árvore; MVP = 1 unlock pra provar o meta-loop ponta a ponta, doc 3.1)
+local CATALOG = {
+	BarricadaReforcada = { name = "Barricada Reforçada", price = 40 },
+}
+local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Vote = 0.2, Buy = 0.5 } -- doc 4.1
 
 -- zona atual (funil, posições da caravana); preenchida pelo loop da run
 local CurrentZone = nil
@@ -101,6 +109,7 @@ local voteEndedRE = ensureRemote("VoteEnded")
 local zoneFadeRE = ensureRemote("ZoneFade")
 local announceRE = ensureRemote("Announce")
 local runEndedRE = ensureRemote("RunEnded")
+local buyRE = ensureRemote("BuyUnlock")
 
 local function ensureFolder(name)
 	local f = workspace:FindFirstChild(name)
@@ -201,6 +210,9 @@ local function initPlayer(plr)
 	if plr.Character then
 		disableNativeRegen(plr.Character)
 	end
+	task.spawn(function()
+		ProfileManager.load(plr) -- perfil persistente (doc 4.4); atributos ProfileCurrency/Unlock_* espelham pro cliente
+	end)
 end
 
 local function addResource(plr, kind, amt)
@@ -240,7 +252,12 @@ Players.PlayerRemoving:Connect(function(plr)
 	if i then
 		table.remove(joinOrder, i)
 	end
+	ProfileManager.release(plr) -- solta o session-lock e grava o perfil (doc 4.4)
 	checkWipe() -- se só sobraram caídos, é derrota
+end)
+
+game:BindToClose(function()
+	ProfileManager.releaseAll()
 end)
 
 -- ===== anti speed/teleport básico (doc 4.1) =====
@@ -552,7 +569,7 @@ local function blockingBarricade(fromPos, toPos)
 	local hit = workspace:Raycast(fromPos, dir, params)
 	if hit and hit.Instance then
 		local model = hit.Instance:FindFirstAncestorOfClass("Model")
-		if model and model:GetAttribute("StructureType") == "Barricada" then
+		if model and model:GetAttribute("IsBarricade") then
 			return model, hit.Position
 		end
 	end
@@ -576,7 +593,8 @@ local function tryAttackBarricade(e, barr)
 	barr:SetAttribute("HP", hp)
 	local body = barr.PrimaryPart
 	if body then
-		body.Color = BARRICADE_COLOR_BROKEN:Lerp(BARRICADE_COLOR, math.clamp(hp / maxHp, 0, 1))
+		local baseColor = barr:GetAttribute("BaseColor") or BARRICADE_COLOR
+		body.Color = BARRICADE_COLOR_BROKEN:Lerp(baseColor, math.clamp(hp / maxHp, 0, 1))
 	end
 	if hp <= 0 then
 		print("[One Way Caravan: Nightfall] Barricada destruida — caminho aberto")
@@ -665,7 +683,10 @@ local function buildStructure(structType, groundPos, lookDir)
 	m.Name = structType
 	m:SetAttribute("StructureType", structType)
 	local gy = groundYAt(groundPos.X, groundPos.Z)
-	if structType == "Barricada" then
+	if structType == "Barricada" or structType == "BarricadaReforcada" then
+		local reinforced = structType == "BarricadaReforcada"
+		local hp = reinforced and BARRICADE_REINFORCED_HP or BARRICADE_HP
+		local baseColor = reinforced and BARRICADE_REINFORCED_COLOR or BARRICADE_COLOR
 		local p = Instance.new("Part")
 		p.Name = "Body"
 		p.Size = Vector3.new(10, 7, 2)
@@ -676,12 +697,27 @@ local function buildStructure(structType, groundPos, lookDir)
 			p.CFrame = CFrame.new(at)
 		end
 		p.Anchored = true
-		p.Color = BARRICADE_COLOR
+		p.Color = baseColor
 		p.Material = Enum.Material.WoodPlanks
 		p.Parent = m
+		if reinforced then
+			for _, dy in ipairs({ -1.8, 1.8 }) do
+				local band = Instance.new("Part")
+				band.Name = "Reforco"
+				band.Size = Vector3.new(10.2, 0.6, 2.2)
+				band.CFrame = p.CFrame * CFrame.new(0, dy, 0)
+				band.Anchored = true
+				band.CanCollide = false
+				band.Color = Color3.fromRGB(140, 140, 150)
+				band.Material = Enum.Material.Metal
+				band.Parent = m
+			end
+		end
 		m.PrimaryPart = p
-		m:SetAttribute("HP", BARRICADE_HP)
-		m:SetAttribute("MaxHP", BARRICADE_HP)
+		m:SetAttribute("IsBarricade", true)
+		m:SetAttribute("BaseColor", baseColor)
+		m:SetAttribute("HP", hp)
+		m:SetAttribute("MaxHP", hp)
 	else -- Fogueira
 		local base = Instance.new("Part")
 		base.Name = "Base"
@@ -776,6 +812,8 @@ placeRE.OnServerEvent:Connect(function(plr, structType, pos)
 	if type(structType) ~= "string" or typeof(pos) ~= "Vector3" then return end
 	local cost = COSTS[structType]
 	if not cost then return end
+	-- construção de catálogo exige o unlock no perfil (doc 5.2; passo 9)
+	if CATALOG[structType] and plr:GetAttribute("Unlock_" .. structType) ~= true then return end
 	local char = plr.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if not hrp then return end
@@ -807,6 +845,21 @@ eatRE.OnServerEvent:Connect(function(plr)
 	r.Food -= 1
 	plr:SetAttribute("Food", r.Food)
 	hum.Health = math.min(hum.MaxHealth, hum.Health + HEAL_PER_FOOD)
+end)
+
+buyRE.OnServerEvent:Connect(function(plr, itemId)
+	if not rateOk(plr, "Buy") then return end
+	if RS:GetAttribute("Phase") ~= "Lobby" then return end -- catálogo é compra de lobby (doc 5.2)
+	if type(itemId) ~= "string" then return end
+	local item = CATALOG[itemId]
+	if not item then return end
+	local ok, err = ProfileManager.tryBuy(plr, itemId, item.price)
+	if ok then
+		announceRE:FireClient(plr, "Desbloqueado: " .. item.name .. "! Vale pra todas as próximas runs.")
+		print("[One Way Caravan: Nightfall] " .. plr.Name .. " comprou " .. itemId)
+	else
+		announceRE:FireClient(plr, "Compra falhou: " .. tostring(err))
+	end
 end)
 
 -- ===== votação de avanço/permanência (doc 5.4) =====
@@ -1003,7 +1056,9 @@ local function travelTo(node)
 	phaseCountdown(ZoneBuilder.tweenCaravanaTo(trans.endCf, CARAVAN_SPEED))
 	task.wait(0.5)
 
-	-- Etapa 3: próximo POI; caravana anda até o meio do mapa e é quando a noite cai (doc 4.5)
+	-- Etapa 3: próximo POI; caravana anda até o acampamento.
+	-- Revisão de gameplay (2026-07): a chegada abre um DIA de preparação antes da noite
+	-- (o doc 4.5 original mandava a noite cair na chegada; decisão do jogo mudou isso).
 	swapZone(function()
 		return ZoneBuilder.buildPOI(node.kind)
 	end)
@@ -1012,7 +1067,7 @@ local function travelTo(node)
 	zoneFadeRE:FireAllClients(false)
 	RS:SetAttribute("NodeName", node.label)
 	RS:SetAttribute("Phase", "Chegada")
-	announce("Chegando: " .. node.label .. ". Quando a caravana parar, a noite cai.")
+	announce("Chegando: " .. node.label .. ". Vocês terão o dia pra se preparar antes da noite.")
 	phaseCountdown(ZoneBuilder.tweenCaravanaTo(CurrentZone.campCf, CARAVAN_SPEED))
 	task.wait(0.5)
 end
@@ -1067,6 +1122,10 @@ end
 local function endRun(victory)
 	despawnAll()
 	local earned = victory and runCurrency or checkpointCurrency
+	-- doc 4.4: a moeda vira dado persistente SÓ no fim da run (vitória = total; derrota = checkpoint)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		ProfileManager.addCurrency(plr, earned)
+	end
 	RS:SetAttribute("Phase", victory and "Vitória" or "Derrota")
 	RS:SetAttribute("PhaseTimeLeft", 0)
 	runEndedRE:FireAllClients({
@@ -1077,9 +1136,9 @@ local function endRun(victory)
 		earned = earned,
 	})
 	if victory then
-		announce("VITÓRIA! A caravana cruzou a rota. Moeda garantida pro grupo: " .. earned .. " (vira perfil no passo 9).")
+		announce("VITÓRIA! A caravana cruzou a rota. " .. earned .. " de moeda creditada no perfil de cada um.")
 	else
-		announce("Fim da run. Moeda salva no último checkpoint: " .. earned .. ". Nova tentativa em " .. RUN_RESTART_DELAY .. "s...")
+		announce("Fim da run. Moeda do checkpoint creditada no perfil: " .. earned .. ". De volta ao lobby em " .. RUN_RESTART_DELAY .. "s...")
 	end
 	task.wait(RUN_RESTART_DELAY)
 end
@@ -1099,36 +1158,65 @@ local function resetPlayersForNewRun()
 	end
 end
 
--- ===== loop de runs =====
+-- ===== loop lobby -> run (passo 9: meta-loop; lobby lógico no mesmo place até o publish em 2 places, doc 4.2) =====
 task.spawn(function()
 	ZoneBuilder.buildCaravana()
 	while true do
-		-- setup da run (caravana e upgrades dela são ativo local da run, doc 5.3)
+		-- LOBBY: gastar moeda do perfil no catálogo e partir quando o grupo quiser
+		local lobby = ZoneBuilder.buildLobby()
+		CurrentZone = lobby
+		ZoneBuilder.pivotCaravanaTo(lobby.caravanaCf)
 		runCurrency, checkpointCurrency, nightCount = 0, 0, 0
 		syncCurrency()
+		RS:SetAttribute("Phase", "Lobby")
+		RS:SetAttribute("NodeName", "Posto de Partida")
+		RS:SetAttribute("PhaseTimeLeft", 0)
 		RS:SetAttribute("BossHP", 0)
 		RS:SetAttribute("Cycle", 0)
 		RS:SetAttribute("EnemiesAlive", 0)
-		local graph = RouteGraph.generate()
-		local node = graph.nodes[graph.currentId]
-		CurrentZone = ZoneBuilder.buildPOI(node.kind)
-		ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
-		RS:SetAttribute("NodeName", node.label)
+		applyDayAmbience()
+		Lighting.ClockTime = 12
 		resetPlayersForNewRun()
 		task.wait(1)
 		teleportPlayersBehindCaravana()
+		announce("Lobby: gastem a moeda no catálogo (painel à direita) e segurem o poste de partida quando estiverem prontos.")
+
+		local prompt = Instance.new("ProximityPrompt")
+		prompt.ActionText = "Iniciar expedição"
+		prompt.ObjectText = "Caravana pronta"
+		prompt.HoldDuration = 2
+		prompt.RequiresLineOfSight = false
+		prompt.MaxActivationDistance = 12
+		prompt.Parent = lobby.startPost
+		local started = false
+		prompt.Triggered:Connect(function()
+			started = true
+		end)
+		while not started do
+			task.wait(0.5)
+		end
+		prompt:Destroy()
+		announce("A expedição parte!")
+		task.wait(1.5)
+
+		-- SETUP DA RUN (caravana e upgrades dela são ativo local da run, doc 5.3)
+		local graph = RouteGraph.generate()
+		local node = graph.nodes[graph.currentId]
+		zoneFadeRE:FireAllClients(true)
+		task.wait(0.7)
+		CurrentZone = ZoneBuilder.buildPOI(node.kind)
+		ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
+		teleportPlayersBehindCaravana()
+		zoneFadeRE:FireAllClients(false)
+		RS:SetAttribute("NodeName", node.label)
 		runState.defeated = false
 		runState.active = true
 
 		local victory = false
 		local stays = 0 -- noites extras consecutivas neste POI (doc 5.4: reseta ao avançar)
-		local needFullDay = true
-		local skipDawn = true
+		local dawnTransition = false -- 1º dia e dias de chegada começam ao meio-dia; pós-noite tem amanhecer
 		while true do
-			if needFullDay then
-				fullDay(skipDawn)
-				skipDawn = false
-			end
+			fullDay(not dawnTransition)
 			if runState.defeated then break end
 			nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
 			if runState.defeated then break end
@@ -1136,7 +1224,7 @@ task.spawn(function()
 			if runState.defeated then break end
 			if decision == "stay" then
 				stays += 1
-				needFullDay = true
+				dawnTransition = true
 				announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
 			else
 				stays = 0
@@ -1144,11 +1232,14 @@ task.spawn(function()
 				graph.currentId = decision
 				travelTo(node)
 				if runState.defeated then break end
+				-- revisão de gameplay: a chegada abre um dia de preparação antes da noite
 				if node.kind == "boss" then
+					fullDay(true) -- dia de preparação também no Covil, antes do boss
+					if runState.defeated then break end
 					victory = bossPhase()
 					break
 				end
-				needFullDay = false -- a noite cai na chegada (doc 4.5, etapa 3)
+				dawnTransition = false -- a viagem já consumiu a manhã; o dia de chegada segue do meio-dia
 			end
 		end
 

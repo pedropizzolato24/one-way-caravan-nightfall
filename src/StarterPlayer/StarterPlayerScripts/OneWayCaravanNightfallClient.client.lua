@@ -17,11 +17,16 @@ local voteEndedRE = remotes:WaitForChild("VoteEnded")
 local zoneFadeRE = remotes:WaitForChild("ZoneFade")
 local announceRE = remotes:WaitForChild("Announce")
 local runEndedRE = remotes:WaitForChild("RunEnded")
+local buyRE = remotes:WaitForChild("BuyUnlock")
 local mouse = plr:GetMouse()
 
 -- espelhos p/ feedback visual; a validação real é sempre do servidor
-local COSTS = { Fogueira = { Wood = 5 }, Barricada = { Wood = 10 } }
-local GHOST_SIZE = { Fogueira = Vector3.new(4, 2.5, 4), Barricada = Vector3.new(10, 7, 2) }
+local COSTS = { Fogueira = { Wood = 5 }, Barricada = { Wood = 10 }, BarricadaReforcada = { Wood = 16 } }
+local GHOST_SIZE = {
+	Fogueira = Vector3.new(4, 2.5, 4),
+	Barricada = Vector3.new(10, 7, 2),
+	BarricadaReforcada = Vector3.new(10, 7, 2),
+}
 local PLACE_RANGE = 35
 
 -- ===== HUD =====
@@ -92,6 +97,7 @@ bossTxt.Parent = bossBar
 local BTN_COLORS = {
 	BuildFire = Color3.fromRGB(50, 70, 50),
 	BuildBarricade = Color3.fromRGB(50, 70, 50),
+	BuildBarricadeR = Color3.fromRGB(50, 62, 78),
 	Eat = Color3.fromRGB(90, 70, 40),
 }
 local BTN_DISABLED = Color3.fromRGB(55, 55, 55)
@@ -111,9 +117,16 @@ local function mkButton(name, pos, text)
 	return b
 end
 
-local fireBtn = mkButton("BuildFire", UDim2.new(0, 8, 1, -132), "Fogueira (5 madeira)")
-local barrBtn = mkButton("BuildBarricade", UDim2.new(0, 8, 1, -90), "Barricada (10 madeira)")
+local fireBtn = mkButton("BuildFire", UDim2.new(0, 8, 1, -174), "Fogueira (5 madeira)")
+local barrBtn = mkButton("BuildBarricade", UDim2.new(0, 8, 1, -132), "Barricada (10 madeira)")
+local barrRefBtn = mkButton("BuildBarricadeR", UDim2.new(0, 8, 1, -90), "Barricada Reforçada (16)")
 local eatBtn = mkButton("Eat", UDim2.new(0, 8, 1, -48), "Comer (1 comida, +25 vida)")
+
+local function refreshUnlocks()
+	barrRefBtn.Visible = plr:GetAttribute("Unlock_BarricadaReforcada") == true
+end
+plr:GetAttributeChangedSignal("Unlock_BarricadaReforcada"):Connect(refreshUnlocks)
+refreshUnlocks()
 
 local function refreshRes()
 	local wood = plr:GetAttribute("Wood") or 0
@@ -121,6 +134,7 @@ local function refreshRes()
 	resLbl.Text = string.format("Madeira: %d | Comida: %d", wood, food)
 	fireBtn.BackgroundColor3 = wood >= COSTS.Fogueira.Wood and BTN_COLORS.BuildFire or BTN_DISABLED
 	barrBtn.BackgroundColor3 = wood >= COSTS.Barricada.Wood and BTN_COLORS.BuildBarricade or BTN_DISABLED
+	barrRefBtn.BackgroundColor3 = wood >= COSTS.BarricadaReforcada.Wood and BTN_COLORS.BuildBarricadeR or BTN_DISABLED
 	eatBtn.BackgroundColor3 = food >= 1 and BTN_COLORS.Eat or BTN_DISABLED
 end
 plr:GetAttributeChangedSignal("Wood"):Connect(refreshRes)
@@ -137,6 +151,7 @@ local PHASE_COLORS = {
 	Boss = Color3.fromRGB(90, 20, 20),
 	["Vitória"] = Color3.fromRGB(25, 70, 40),
 	Derrota = Color3.fromRGB(60, 25, 25),
+	Lobby = Color3.fromRGB(25, 70, 70),
 }
 
 local function refreshPhase()
@@ -153,6 +168,8 @@ local function refreshPhase()
 		phaseLbl.Text = "Vitória!"
 	elseif phase == "Derrota" then
 		phaseLbl.Text = "Derrota"
+	elseif phase == "Lobby" then
+		phaseLbl.Text = "Lobby — preparem a expedição"
 	else
 		phaseLbl.Text = string.format("%s — %ds", phase, t)
 	end
@@ -291,6 +308,108 @@ announceRE.OnClientEvent:Connect(function(text)
 	end)
 end)
 
+-- ===== catálogo do lobby (passo 9: 1 unlock lateral, doc 3.1/5.2) =====
+local CATALOG_UI = {
+	{
+		id = "BarricadaReforcada",
+		name = "Barricada Reforçada",
+		price = 40,
+		desc = "400 HP com faixas de metal, mas custa 16 madeira. Sidegrade: aguenta mais, drena mais recurso.",
+	},
+}
+
+local catalogFrame = Instance.new("Frame")
+catalogFrame.Name = "Catalog"
+catalogFrame.AnchorPoint = Vector2.new(1, 0.5)
+catalogFrame.Position = UDim2.new(1, -8, 0.5, 0)
+catalogFrame.Size = UDim2.new(0, 260, 0, 70 + #CATALOG_UI * 112)
+catalogFrame.BackgroundColor3 = Color3.fromRGB(18, 24, 24)
+catalogFrame.BackgroundTransparency = 0.15
+catalogFrame.Visible = false
+catalogFrame.Parent = gui
+round(catalogFrame)
+
+local catTitle = Instance.new("TextLabel")
+catTitle.Position = UDim2.new(0, 8, 0, 6)
+catTitle.Size = UDim2.new(1, -16, 0, 26)
+catTitle.BackgroundTransparency = 1
+catTitle.TextColor3 = Color3.new(1, 1, 1)
+catTitle.TextScaled = true
+catTitle.Font = Enum.Font.SourceSansBold
+catTitle.Text = "Catálogo Lateral"
+catTitle.Parent = catalogFrame
+
+local walletLbl = Instance.new("TextLabel")
+walletLbl.Position = UDim2.new(0, 8, 0, 34)
+walletLbl.Size = UDim2.new(1, -16, 0, 22)
+walletLbl.BackgroundTransparency = 1
+walletLbl.TextColor3 = Color3.fromRGB(240, 220, 140)
+walletLbl.TextScaled = true
+walletLbl.Font = Enum.Font.SourceSansBold
+walletLbl.Parent = catalogFrame
+
+local buyButtons = {} -- id -> TextButton
+for i, item in ipairs(CATALOG_UI) do
+	local y = 62 + (i - 1) * 112
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.Position = UDim2.new(0, 8, 0, y)
+	nameLbl.Size = UDim2.new(1, -16, 0, 24)
+	nameLbl.BackgroundTransparency = 1
+	nameLbl.TextColor3 = Color3.new(1, 1, 1)
+	nameLbl.TextScaled = true
+	nameLbl.Font = Enum.Font.SourceSansBold
+	nameLbl.Text = item.name
+	nameLbl.Parent = catalogFrame
+	local descLbl = Instance.new("TextLabel")
+	descLbl.Position = UDim2.new(0, 8, 0, y + 26)
+	descLbl.Size = UDim2.new(1, -16, 0, 44)
+	descLbl.BackgroundTransparency = 1
+	descLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+	descLbl.TextSize = 14
+	descLbl.TextWrapped = true
+	descLbl.TextYAlignment = Enum.TextYAlignment.Top
+	descLbl.Font = Enum.Font.SourceSans
+	descLbl.Text = item.desc
+	descLbl.Parent = catalogFrame
+	local buyBtn = Instance.new("TextButton")
+	buyBtn.Position = UDim2.new(0, 8, 0, y + 74)
+	buyBtn.Size = UDim2.new(1, -16, 0, 30)
+	buyBtn.TextColor3 = Color3.new(1, 1, 1)
+	buyBtn.TextScaled = true
+	buyBtn.Font = Enum.Font.SourceSansBold
+	buyBtn.Parent = catalogFrame
+	round(buyBtn)
+	buyBtn.MouseButton1Click:Connect(function()
+		buyRE:FireServer(item.id)
+	end)
+	buyButtons[item.id] = buyBtn
+end
+
+local function refreshCatalog()
+	local wallet = plr:GetAttribute("ProfileCurrency") or 0
+	walletLbl.Text = "Sua moeda (perfil): " .. wallet
+	for _, item in ipairs(CATALOG_UI) do
+		local b = buyButtons[item.id]
+		if b then
+			local owned = plr:GetAttribute("Unlock_" .. item.id) == true
+			b.Text = owned and "Desbloqueado" or ("Comprar por " .. item.price)
+			b.BackgroundColor3 = owned and Color3.fromRGB(45, 65, 45)
+				or (wallet >= item.price and Color3.fromRGB(60, 95, 60) or Color3.fromRGB(55, 55, 55))
+		end
+	end
+end
+plr:GetAttributeChangedSignal("ProfileCurrency"):Connect(refreshCatalog)
+for _, item in ipairs(CATALOG_UI) do
+	plr:GetAttributeChangedSignal("Unlock_" .. item.id):Connect(refreshCatalog)
+end
+refreshCatalog()
+
+local function refreshCatalogVisible()
+	catalogFrame.Visible = RS:GetAttribute("Phase") == "Lobby"
+end
+RS:GetAttributeChangedSignal("Phase"):Connect(refreshCatalogVisible)
+refreshCatalogVisible()
+
 -- ===== tela de fim de run =====
 local endFrame = Instance.new("Frame")
 endFrame.Name = "RunEnd"
@@ -324,8 +443,9 @@ runEndedRE.OnClientEvent:Connect(function(data)
 	endTitle.Text = data.victory and "VITÓRIA!" or "A CARAVANA SE PERDEU"
 	endTitle.TextColor3 = data.victory and Color3.fromRGB(120, 230, 140) or Color3.fromRGB(230, 100, 90)
 	endBody.Text = string.format(
-		"Noites sobrevividas: %d\nMoeda da run: %d | Checkpoint: %d\nMoeda garantida pro grupo: %d\n\nNova run em instantes...",
-		data.nights or 0, data.currency or 0, data.checkpoint or 0, data.earned or 0)
+		"Noites sobrevividas: %d\nMoeda da run: %d | Checkpoint: %d\nCreditado no perfil: %d | Perfil agora: %d\n\nDe volta ao lobby...",
+		data.nights or 0, data.currency or 0, data.checkpoint or 0, data.earned or 0,
+		plr:GetAttribute("ProfileCurrency") or 0)
 	endFrame.Visible = true
 	task.delay(16, function()
 		endFrame.Visible = false
@@ -373,6 +493,7 @@ end
 
 fireBtn.MouseButton1Click:Connect(function() startPlacing("Fogueira") end)
 barrBtn.MouseButton1Click:Connect(function() startPlacing("Barricada") end)
+barrRefBtn.MouseButton1Click:Connect(function() startPlacing("BarricadaReforcada") end)
 eatBtn.MouseButton1Click:Connect(function() eatRE:FireServer() end)
 
 RunService.RenderStepped:Connect(function()

@@ -12,6 +12,9 @@
       },
       "RouteGraph": {
         "$path": "src/ServerScriptService/RouteGraph.lua"
+      },
+      "ProfileManager": {
+        "$path": "src/ServerScriptService/ProfileManager.lua"
       }
     },
     "StarterPlayer": {
