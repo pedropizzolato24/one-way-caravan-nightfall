@@ -54,6 +54,16 @@ local function replaceGround(minV, maxV, from, to)
 	terrain:ReplaceMaterial(Region3.new(minV, maxV):ExpandToGrid(4), 4, from, to)
 end
 
+-- altura real da superfície do terreno em (x,z). A superfície suavizada do Terrain fica um pouco
+-- acima de y=0, então props posicionados assumindo chão em 0 afundavam; assentar por raycast resolve.
+local function terrainGroundY(x, z)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { terrain }
+	local hit = workspace:Raycast(Vector3.new(x, 140, z), Vector3.new(0, -300, 0), params)
+	return hit and hit.Position.Y or 0
+end
+
 local function clearZone()
 	for _, n in ipairs({ "Mapa", "EnemySpawns", "GreyboxMap", "Baseplate" }) do
 		local x = workspace:FindFirstChild(n)
@@ -91,25 +101,26 @@ end
 
 local function mkTree(rng, i, x, z, dead)
 	local s = rng:NextNumber(0.85, 1.25)
+	local gy = terrainGroundY(x, z)
 	local m = Instance.new("Model")
 	m.Name = (dead and "ArvoreSeca" or "Arvore") .. i
 	local trunkColor = dead and Color3.fromRGB(74, 56, 40) or Color3.fromRGB(110, 76, 44)
-	local trunk = mkPart("Tronco", Vector3.new(1.6 * s, 7 * s, 1.6 * s), Vector3.new(x, 3.5 * s, z), trunkColor, m,
+	local trunk = mkPart("Tronco", Vector3.new(1.6 * s, 7 * s, 1.6 * s), Vector3.new(x, gy + 3.4 * s, z), trunkColor, m,
 		{ Material = Enum.Material.Wood })
 	if dead then
 		for g = 1, 2 do
-			local galho = mkPart("Galho" .. g, Vector3.new(0.7 * s, 4 * s, 0.7 * s), Vector3.new(x, 6.8 * s, z),
+			local galho = mkPart("Galho" .. g, Vector3.new(0.7 * s, 4 * s, 0.7 * s), Vector3.new(x, gy + 6.8 * s, z),
 				Color3.fromRGB(70, 52, 38), m, { Material = Enum.Material.Wood })
-			galho.CFrame = CFrame.new(x, 6.8 * s, z)
+			galho.CFrame = CFrame.new(x, gy + 6.8 * s, z)
 				* CFrame.Angles(0, rng:NextNumber(0, 6.28), math.rad(g == 1 and 35 or -30))
 				* CFrame.new(0, 1.4 * s, 0)
 		end
 	else
 		local g = 90 + rng:NextInteger(-25, 25)
-		mkPart("Copa1", Vector3.new(6 * s, 6 * s, 6 * s), Vector3.new(x, 8.2 * s, z), Color3.fromRGB(56, g, 52), m,
+		mkPart("Copa1", Vector3.new(6 * s, 6 * s, 6 * s), Vector3.new(x, gy + 8.1 * s, z), Color3.fromRGB(56, g, 52), m,
 			{ Shape = Enum.PartType.Ball, Material = Enum.Material.Grass, CanCollide = false })
 		mkPart("Copa2", Vector3.new(4.2 * s, 4.2 * s, 4.2 * s),
-			Vector3.new(x + rng:NextNumber(-1, 1), 11 * s, z + rng:NextNumber(-1, 1)), Color3.fromRGB(50, g - 12, 48), m,
+			Vector3.new(x + rng:NextNumber(-1, 1), gy + 10.9 * s, z + rng:NextNumber(-1, 1)), Color3.fromRGB(50, g - 12, 48), m,
 			{ Shape = Enum.PartType.Ball, Material = Enum.Material.Grass, CanCollide = false })
 	end
 	m.PrimaryPart = trunk
@@ -121,11 +132,12 @@ end
 
 local function mkBush(rng, i, x, z)
 	local s = rng:NextNumber(0.9, 1.2)
+	local gy = terrainGroundY(x, z)
 	local m = Instance.new("Model")
 	m.Name = "Arbusto" .. i
-	local folhas = mkPart("Folhas", Vector3.new(3.4 * s, 2.8 * s, 3.4 * s), Vector3.new(x, 1.4 * s, z),
+	local folhas = mkPart("Folhas", Vector3.new(3.4 * s, 2.8 * s, 3.4 * s), Vector3.new(x, gy + 1.3 * s, z),
 		Color3.fromRGB(64, 118, 56), m, { Shape = Enum.PartType.Ball, Material = Enum.Material.Grass })
-	mkPart("Frutas", Vector3.new(1.3, 1.3, 1.3), Vector3.new(x + 0.9 * s, 2.2 * s, z + 0.5 * s),
+	mkPart("Frutas", Vector3.new(1.3, 1.3, 1.3), Vector3.new(x + 0.9 * s, gy + 2.1 * s, z + 0.5 * s),
 		Color3.fromRGB(196, 60, 70), m, { Shape = Enum.PartType.Ball, Material = Enum.Material.SmoothPlastic, CanCollide = false })
 	m.PrimaryPart = folhas
 	m:SetAttribute("NodeType", "Food")
@@ -135,11 +147,13 @@ local function mkBush(rng, i, x, z)
 end
 
 local function mkCrate(i, x, z, y)
+	-- y = altura extra acima do chão (ex.: caixa sobre a plataforma da estação); 0 = assenta no terreno
+	local baseY = terrainGroundY(x, z) + (y or 0)
 	local m = Instance.new("Model")
 	m.Name = "Caixa" .. i
-	local box = mkPart("Corpo", Vector3.new(2.2, 2.2, 2.2), Vector3.new(x, (y or 0) + 1.1, z),
+	local box = mkPart("Corpo", Vector3.new(2.2, 2.2, 2.2), Vector3.new(x, baseY + 1.1, z),
 		Color3.fromRGB(140, 108, 66), m, { Material = Enum.Material.WoodPlanks })
-	mkPart("Tampa", Vector3.new(2.4, 0.3, 2.4), Vector3.new(x, (y or 0) + 2.35, z),
+	mkPart("Tampa", Vector3.new(2.4, 0.3, 2.4), Vector3.new(x, baseY + 2.35, z),
 		Color3.fromRGB(120, 92, 56), m, { Material = Enum.Material.WoodPlanks, CanCollide = false })
 	m.PrimaryPart = box
 	m:SetAttribute("NodeType", "Food")
@@ -202,23 +216,26 @@ function ZoneBuilder.buildPOI(kind)
 
 	mkPart("PilarOeste", Vector3.new(3, 14, 8), Vector3.new(-6.5, 7, RIDGE_Z), ROCK_COLOR, mapa)
 	mkPart("PilarLeste", Vector3.new(3, 14, 8), Vector3.new(6.5, 7, RIDGE_Z), ROCK_COLOR, mapa)
-	mkPart("GapMarker", Vector3.new(10, 0.2, 6), Vector3.new(0, 0.1, RIDGE_Z), Color3.fromRGB(80, 200, 120), mapa,
-		{ CanCollide = false, Transparency = 0.5, Material = Enum.Material.Neon })
+	mkPart("GapMarker", Vector3.new(10, 0.2, 6), Vector3.new(0, terrainGroundY(0, RIDGE_Z) + 0.12, RIDGE_Z),
+		Color3.fromRGB(80, 200, 120), mapa, { CanCollide = false, Transparency = 0.5, Material = Enum.Material.Neon })
 
 	-- círculo de fogueira (sugere onde construir)
-	mkPart("CirculoFogueira", Vector3.new(4.4, 0.2, 4.4), Vector3.new(13, 0.1, -42), Color3.fromRGB(45, 40, 36), mapa,
+	local circY = terrainGroundY(13, -42)
+	mkPart("CirculoFogueira", Vector3.new(4.4, 0.2, 4.4), Vector3.new(13, circY + 0.1, -42), Color3.fromRGB(45, 40, 36), mapa,
 		{ CanCollide = false, Material = Enum.Material.Ground })
 	for k = 1, 6 do
 		local ang = (k / 6) * math.pi * 2
+		local fx, fz = 13 + math.cos(ang) * 2.4, -42 + math.sin(ang) * 2.4
 		mkPart("PedraFogueira" .. k, Vector3.new(1.2, 0.9, 1.1),
-			Vector3.new(13 + math.cos(ang) * 2.4, 0.4, -42 + math.sin(ang) * 2.4), ROCK_COLOR, mapa)
+			Vector3.new(fx, terrainGroundY(fx, fz) + 0.35, fz), ROCK_COLOR, mapa)
 	end
 
 	-- pedras decorativas
 	scatter(rng, cfg.rocks, -220, 215, cfg.lake, function(i, x, z)
 		local s = rng:NextNumber(2.4, 6)
-		local p = mkPart("Pedra" .. i, Vector3.new(s, s * 0.7, s * 0.9), Vector3.new(x, s * 0.3, z), ROCK_COLOR, mapa)
-		p.CFrame = CFrame.new(x, s * 0.3, z) * CFrame.Angles(rng:NextNumber(-0.2, 0.2), rng:NextNumber(0, 6.28), rng:NextNumber(-0.2, 0.2))
+		local ry = terrainGroundY(x, z) + s * 0.3
+		local p = mkPart("Pedra" .. i, Vector3.new(s, s * 0.7, s * 0.9), Vector3.new(x, ry, z), ROCK_COLOR, mapa)
+		p.CFrame = CFrame.new(x, ry, z) * CFrame.Angles(rng:NextNumber(-0.2, 0.2), rng:NextNumber(0, 6.28), rng:NextNumber(-0.2, 0.2))
 	end)
 
 	-- recursos: floresta ao sul, madeira seca (mais usos, mais risco) no norte
@@ -283,8 +300,9 @@ function ZoneBuilder.buildPOI(kind)
 		mkPart("CovilFundo", Vector3.new(20, 18, 2), Vector3.new(0, 9, 154), Color3.fromRGB(12, 10, 14), mapa,
 			{ Material = Enum.Material.Basalt })
 		for b = 1, 6 do
+			local ox, oz = rng:NextNumber(-30, 30), rng:NextNumber(60, 140)
 			mkPart("Osso" .. b, Vector3.new(rng:NextNumber(1.5, 3), 0.6, 0.6),
-				Vector3.new(rng:NextNumber(-30, 30), 0.3, rng:NextNumber(60, 140)),
+				Vector3.new(ox, terrainGroundY(ox, oz) + 0.3, oz),
 				Color3.fromRGB(220, 214, 196), mapa, { Material = Enum.Material.SmoothPlastic })
 		end
 	end
@@ -293,7 +311,7 @@ function ZoneBuilder.buildPOI(kind)
 	local spawnsFolder = Instance.new("Folder")
 	spawnsFolder.Name = "EnemySpawns"
 	for i, xz in ipairs({ { -30, 118 }, { 0, 124 }, { 30, 118 }, { -14, 136 }, { 16, 136 } }) do
-		local pad = mkPart("Spawn" .. i, Vector3.new(8, 0.4, 8), Vector3.new(xz[1], 0.2, xz[2]),
+		local pad = mkPart("Spawn" .. i, Vector3.new(8, 0.4, 8), Vector3.new(xz[1], terrainGroundY(xz[1], xz[2]) + 0.2, xz[2]),
 			Color3.fromRGB(170, 60, 60), spawnsFolder, { CanCollide = false, Transparency = 0.55, Material = Enum.Material.Neon })
 		pad.Locked = true
 	end
@@ -341,8 +359,9 @@ function ZoneBuilder.buildTransition()
 		local side = rng:NextInteger(0, 1) == 0 and -1 or 1
 		local s = rng:NextNumber(2.4, 6)
 		local x, z = side * rng:NextNumber(14, 70), rng:NextNumber(-200, 200)
-		local p = mkPart("Pedra" .. i, Vector3.new(s, s * 0.7, s * 0.9), Vector3.new(x, s * 0.3, z), ROCK_COLOR, mapa)
-		p.CFrame = CFrame.new(x, s * 0.3, z) * CFrame.Angles(0, rng:NextNumber(0, 6.28), 0)
+		local ry = terrainGroundY(x, z) + s * 0.3
+		local p = mkPart("Pedra" .. i, Vector3.new(s, s * 0.7, s * 0.9), Vector3.new(x, ry, z), ROCK_COLOR, mapa)
+		p.CFrame = CFrame.new(x, ry, z) * CFrame.Angles(0, rng:NextNumber(0, 6.28), 0)
 	end
 
 	moveSpawnLocation(Vector3.new(-12, 0.5, -188))
@@ -374,11 +393,12 @@ function ZoneBuilder.buildLobby()
 	-- fogueira permanente do posto
 	for k = 1, 6 do
 		local ang = (k / 6) * math.pi * 2
+		local fx, fz = 16 + math.cos(ang) * 2.4, -8 + math.sin(ang) * 2.4
 		mkPart("PedraFogueira" .. k, Vector3.new(1.2, 0.9, 1.1),
-			Vector3.new(16 + math.cos(ang) * 2.4, 0.4, -8 + math.sin(ang) * 2.4), ROCK_COLOR, mapa)
+			Vector3.new(fx, terrainGroundY(fx, fz) + 0.35, fz), ROCK_COLOR, mapa)
 	end
-	local flame = mkPart("FogoPosto", Vector3.new(1.8, 1.8, 1.8), Vector3.new(16, 1.2, -8), Color3.fromRGB(255, 140, 30),
-		mapa, { Shape = Enum.PartType.Ball, Material = Enum.Material.Neon, CanCollide = false })
+	local flame = mkPart("FogoPosto", Vector3.new(1.8, 1.8, 1.8), Vector3.new(16, terrainGroundY(16, -8) + 1.2, -8),
+		Color3.fromRGB(255, 140, 30), mapa, { Shape = Enum.PartType.Ball, Material = Enum.Material.Neon, CanCollide = false })
 	local fire = Instance.new("Fire")
 	fire.Size = 5
 	fire.Parent = flame

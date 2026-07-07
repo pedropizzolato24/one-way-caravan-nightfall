@@ -678,24 +678,58 @@ local function groundYAt(x, z)
 	return hit and hit.Position.Y or 0
 end
 
+-- rejeita colocar uma estrutura em cima de um jogador (evita noclip/soft-lock em paredes)
+local function overlapsCharacter(cf, size)
+	local padXZ = 2.5 -- raio aproximado do personagem + folga
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local char = plr.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local lp = cf:PointToObjectSpace(hrp.Position)
+			if math.abs(lp.X) < size.X / 2 + padXZ
+				and math.abs(lp.Z) < size.Z / 2 + padXZ
+				and math.abs(lp.Y) < size.Y / 2 + 4 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- retorna o Model criado, ou nil se a posição está bloqueada (o handler não debita recurso nesse caso)
 local function buildStructure(structType, groundPos, lookDir)
+	local gy = groundYAt(groundPos.X, groundPos.Z)
+	local isBarricade = structType == "Barricada" or structType == "BarricadaReforcada"
+
+	-- computa posição/volume ANTES de criar, pra validar sobreposição com jogadores
+	local cf, size
+	if isBarricade then
+		size = Vector3.new(10, 7, 2)
+		local at = Vector3.new(groundPos.X, gy + 3.5, groundPos.Z)
+		if lookDir and lookDir.Magnitude > 0.05 then
+			cf = CFrame.lookAt(at, at + lookDir) -- parede perpendicular a onde o jogador olha
+		else
+			cf = CFrame.new(at)
+		end
+	else -- Fogueira: volume aproximado pra checagem
+		size = Vector3.new(4, 4, 4)
+		cf = CFrame.new(groundPos.X, gy + 2, groundPos.Z)
+	end
+	if overlapsCharacter(cf, size) then
+		return nil
+	end
+
 	local m = Instance.new("Model")
 	m.Name = structType
 	m:SetAttribute("StructureType", structType)
-	local gy = groundYAt(groundPos.X, groundPos.Z)
-	if structType == "Barricada" or structType == "BarricadaReforcada" then
+	if isBarricade then
 		local reinforced = structType == "BarricadaReforcada"
 		local hp = reinforced and BARRICADE_REINFORCED_HP or BARRICADE_HP
 		local baseColor = reinforced and BARRICADE_REINFORCED_COLOR or BARRICADE_COLOR
 		local p = Instance.new("Part")
 		p.Name = "Body"
-		p.Size = Vector3.new(10, 7, 2)
-		local at = Vector3.new(groundPos.X, gy + 3.5, groundPos.Z)
-		if lookDir and lookDir.Magnitude > 0.05 then
-			p.CFrame = CFrame.lookAt(at, at + lookDir) -- parede perpendicular a onde o jogador olha
-		else
-			p.CFrame = CFrame.new(at)
-		end
+		p.Size = size
+		p.CFrame = cf
 		p.Anchored = true
 		p.Color = baseColor
 		p.Material = Enum.Material.WoodPlanks
@@ -750,6 +784,7 @@ local function buildStructure(structType, groundPos, lookDir)
 		m.PrimaryPart = base
 	end
 	m.Parent = structuresFolder
+	return m
 end
 
 -- ===== handlers de remotes (validação total server-side, doc 4.1) =====
@@ -824,12 +859,17 @@ placeRE.OnServerEvent:Connect(function(plr, structType, pos)
 	for kind, amt in pairs(cost) do
 		if (r[kind] or 0) < amt then return end
 	end
+	-- constrói primeiro; só debita se a posição não estava bloqueada por um jogador
+	local look = hrp.CFrame.LookVector
+	local built = buildStructure(structType, Vector3.new(pos.X, pos.Y, pos.Z), Vector3.new(look.X, 0, look.Z))
+	if not built then
+		announceRE:FireClient(plr, "Não dá pra construir aí — muito perto de alguém.")
+		return
+	end
 	for kind, amt in pairs(cost) do
 		r[kind] -= amt
 		plr:SetAttribute(kind, r[kind])
 	end
-	local look = hrp.CFrame.LookVector
-	buildStructure(structType, Vector3.new(pos.X, pos.Y, pos.Z), Vector3.new(look.X, 0, look.Z))
 	print("[One Way Caravan: Nightfall] " .. plr.Name .. " construiu " .. structType)
 end)
 

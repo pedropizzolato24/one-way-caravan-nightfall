@@ -126,7 +126,7 @@ Preview de zona no modo Edit (opcional, com Rojo conectado):
 - Split físico em 2 places (lobby + run, TeleportService com reserved server, doc 4.2) pendente de
   publish; o lobby hoje é uma zona no mesmo place. ProfileManager caseiro — trocar a implementação
   interna pelo ProfileStore oficial (loleris) quando importar o módulo (interface já compatível).
-- Estruturas podem sobrepor jogadores/inimigos; caravana atravessa estruturas construídas fora da estrada durante a partida.
+- Estruturas ainda podem sobrepor inimigos (jogadores já são bloqueados); caravana atravessa estruturas construídas fora da estrada durante a partida.
 - Colocação usa mouse; em touch funciona por tap, mas sem UX dedicada de mobile (passo 10).
 - Inimigo é MoveTo direto (sem PathfindingService); pode travar em quina fora do funil — aceito pelo doc 4.8.
 - Troca de zona usa fade + teleporte (loading “duro”); doc 4.5 marca isso como detalhe de build, revisar no passo 10.

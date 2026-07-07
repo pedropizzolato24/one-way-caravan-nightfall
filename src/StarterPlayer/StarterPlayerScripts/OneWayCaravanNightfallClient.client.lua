@@ -524,6 +524,12 @@ RunService.RenderStepped:Connect(function()
 	for kind, amt in pairs(COSTS[placing]) do
 		if (plr:GetAttribute(kind) or 0) < amt then ok = false end
 	end
+	-- espelha a checagem do servidor: não colocar em cima do próprio personagem (evita prender)
+	local lp = ghost.CFrame:PointToObjectSpace(hrp.Position)
+	local sz = ghost.Size
+	if math.abs(lp.X) < sz.X / 2 + 2.5 and math.abs(lp.Z) < sz.Z / 2 + 2.5 and math.abs(lp.Y) < sz.Y / 2 + 4 then
+		ok = false
+	end
 	ghost.Color = ok and Color3.fromRGB(90, 220, 120) or Color3.fromRGB(230, 80, 70)
 end)
 
