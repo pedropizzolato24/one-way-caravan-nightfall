@@ -1,8 +1,8 @@
--- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.7)
--- Toda autoridade de HP, recursos, spawn, dano, morte, rota e votação vive AQUI.
+-- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.8)
+-- Toda autoridade de HP, recursos, spawn, dano, morte, rota, votação e economia vive AQUI.
 -- Cliente só envia intenção via RemoteEvents validados e rate-limitados.
--- Passo 7: grafo de rota (RouteGraph) + zonas em runtime (ZoneBuilder) + travessia NPC-driven em
--- 3 etapas (doc 4.5) + votação de avanço/permanência com escalada por permanência (doc 5.4).
+-- Passo 7: grafo de rota + zonas em runtime + travessia NPC-driven + votação (doc 4.5/4.6/5.4).
+-- Passo 8: boss no Covil, checkpoint, vitória/derrota (wipe) e moeda de run (doc 5.8).
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
@@ -34,6 +34,19 @@ local ENEMY_DMG_BARRICADE = 5
 local ENEMY_ATTACK_RANGE = 5
 local ENEMY_ATTACK_COOLDOWN = 1.2
 local AI_TICK = 0.6 -- repath com throttle (doc 4.8), nunca por frame
+-- boss (doc 3.1: 1 inimigo comum + 1 boss; luta no funil do Covil)
+local BOSS_HP = 600
+local BOSS_WALKSPEED = 8
+local BOSS_DMG = 25
+local BOSS_BARRICADE_DMG = 25
+local BOSS_ATTACK_RANGE = 8
+local BOSS_ATTACK_COOLDOWN = 1.6
+local BOSS_ADDS_INTERVAL = 40 -- reforços do covil durante a luta
+local BOSS_ADDS_COUNT = 3
+-- economia de run (doc 5.8: recompensa fixa e igual ao grupo por evento compartilhado; valores de exemplo do doc)
+local NIGHT_REWARD = 10
+local BOSS_REWARD = 20
+local RUN_RESTART_DELAY = 15 -- fim de run -> nova run (no jogo real, volta pro lobby; passo 9)
 local WEAPON_DMG = 25
 local WEAPON_RANGE = 10
 local WOOD_PER_COLLECT = 2
@@ -56,6 +69,8 @@ local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Vote =
 
 -- zona atual (funil, posições da caravana); preenchida pelo loop da run
 local CurrentZone = nil
+-- estado da run: active liga a checagem de wipe; defeated interrompe as fases
+local runState = { active = false, defeated = false }
 
 -- ===== infraestrutura (cria o que faltar p/ o servidor nunca travar em WaitForChild) =====
 local remotes = RS:FindFirstChild("Remotes")
@@ -85,6 +100,7 @@ local voteUpdateRE = ensureRemote("VoteUpdate")
 local voteEndedRE = ensureRemote("VoteEnded")
 local zoneFadeRE = ensureRemote("ZoneFade")
 local announceRE = ensureRemote("Announce")
+local runEndedRE = ensureRemote("RunEnded")
 
 local function ensureFolder(name)
 	local f = workspace:FindFirstChild(name)
@@ -121,6 +137,36 @@ local function campPos()
 	return CAMP_FALLBACK
 end
 
+-- ===== economia de run (doc 5.8; persistência de verdade entra no passo 9) =====
+local runCurrency = 0 -- acumulada na run, igual pro grupo inteiro
+local checkpointCurrency = 0 -- salva a cada boss; é o que sobrevive à derrota
+
+local function syncCurrency()
+	RS:SetAttribute("Currency", runCurrency)
+	RS:SetAttribute("CheckpointCurrency", checkpointCurrency)
+end
+
+-- ===== derrota: grupo inteiro caído (doc 5.4: derrota = grupo inteiro morre) =====
+local function checkWipe()
+	if not runState.active or runState.defeated then return end
+	task.defer(function()
+		if not runState.active or runState.defeated then return end
+		local anyPlayer = false
+		for _, plr in ipairs(Players:GetPlayers()) do
+			anyPlayer = true
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 and not plr:GetAttribute("Downed") then
+				return -- alguém ainda está de pé
+			end
+		end
+		if anyPlayer then
+			runState.defeated = true
+			announce("O grupo inteiro caiu. A caravana se perdeu na noite...")
+		end
+	end)
+end
+
 -- ===== recursos (contagem 100% server-side; atributo no Player é só espelho p/ UI) =====
 local resources = {} -- [player] = { Wood = n, Food = n }
 local joinOrder = {} -- ordem de entrada; joinOrder[1] = host (desempata votação, doc 5.4)
@@ -145,6 +191,12 @@ local function initPlayer(plr)
 	plr.CharacterAdded:Connect(function(char)
 		plr:SetAttribute("Downed", false)
 		disableNativeRegen(char)
+		task.spawn(function()
+			local hum = char:WaitForChild("Humanoid", 5)
+			if hum then
+				hum.Died:Connect(checkWipe)
+			end
+		end)
 	end)
 	if plr.Character then
 		disableNativeRegen(plr.Character)
@@ -188,6 +240,7 @@ Players.PlayerRemoving:Connect(function(plr)
 	if i then
 		table.remove(joinOrder, i)
 	end
+	checkWipe() -- se só sobraram caídos, é derrota
 end)
 
 -- ===== anti speed/teleport básico (doc 4.1) =====
@@ -238,6 +291,7 @@ poolFolder.Name = "EnemyPool"
 poolFolder.Parent = ServerStorage
 
 local activeEnemies = {} -- set [model] = true
+local bossModel = nil -- criado 1x no boot, guardado em ServerStorage fora do pool comum
 
 local function makeEnemyRig(name)
 	local m = Instance.new("Model")
@@ -277,7 +331,66 @@ local function makeEnemyRig(name)
 	hum.Parent = m
 	m:SetAttribute("HP", ENEMY_MAX_HP)
 	m:SetAttribute("MaxHP", ENEMY_MAX_HP)
+	m:SetAttribute("Dmg", ENEMY_DMG_PLAYER)
+	m:SetAttribute("BarricadeDmg", ENEMY_DMG_BARRICADE)
+	m:SetAttribute("AttackRange", ENEMY_ATTACK_RANGE)
+	m:SetAttribute("AttackCooldown", ENEMY_ATTACK_COOLDOWN)
 	m:SetAttribute("TimesSpawned", 0)
+	return m
+end
+
+local function makeBossRig()
+	local m = Instance.new("Model")
+	m.Name = "Boss"
+	local hrp = Instance.new("Part")
+	hrp.Name = "HumanoidRootPart"
+	hrp.Size = Vector3.new(4, 4, 2)
+	hrp.Transparency = 1
+	hrp.CanCollide = true
+	hrp.CFrame = CFrame.new(0, 5, 0)
+	hrp.Parent = m
+	local function bpart(name, size, cf, color, opts)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size
+		p.CFrame = cf
+		p.Color = color
+		p.Material = Enum.Material.Slate
+		p.CanCollide = false
+		if opts then
+			for k, v in pairs(opts) do p[k] = v end
+		end
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = hrp
+		w.Part1 = p
+		w.Parent = p
+		p.Parent = m
+		return p
+	end
+	bpart("Torso", Vector3.new(4, 4, 2), hrp.CFrame, Color3.fromRGB(45, 25, 55))
+	bpart("Head", Vector3.new(2.6, 2.6, 2.6), hrp.CFrame * CFrame.new(0, 3.1, 0), Color3.fromRGB(60, 30, 70),
+		{ Shape = Enum.PartType.Ball })
+	bpart("OlhoOeste", Vector3.new(0.5, 0.5, 0.5), hrp.CFrame * CFrame.new(-0.55, 3.3, -1.15), Color3.fromRGB(255, 40, 40),
+		{ Shape = Enum.PartType.Ball, Material = Enum.Material.Neon })
+	bpart("OlhoLeste", Vector3.new(0.5, 0.5, 0.5), hrp.CFrame * CFrame.new(0.55, 3.3, -1.15), Color3.fromRGB(255, 40, 40),
+		{ Shape = Enum.PartType.Ball, Material = Enum.Material.Neon })
+	bpart("BracoOeste", Vector3.new(1.4, 3.8, 1.4), hrp.CFrame * CFrame.new(-2.8, -0.4, 0), Color3.fromRGB(40, 22, 50))
+	bpart("BracoLeste", Vector3.new(1.4, 3.8, 1.4), hrp.CFrame * CFrame.new(2.8, -0.4, 0), Color3.fromRGB(40, 22, 50))
+	m.PrimaryPart = hrp
+	local hum = Instance.new("Humanoid")
+	hum.MaxHealth = 100000 -- HP real é o atributo; Humanoid é só locomoção
+	hum.Health = 100000
+	hum.WalkSpeed = BOSS_WALKSPEED
+	hum.HipHeight = 0
+	hum.RequiresNeck = false
+	hum.BreakJointsOnDeath = false
+	hum.Parent = m
+	m:SetAttribute("HP", BOSS_HP)
+	m:SetAttribute("MaxHP", BOSS_HP)
+	m:SetAttribute("Dmg", BOSS_DMG)
+	m:SetAttribute("BarricadeDmg", BOSS_BARRICADE_DMG)
+	m:SetAttribute("AttackRange", BOSS_ATTACK_RANGE)
+	m:SetAttribute("AttackCooldown", BOSS_ATTACK_COOLDOWN)
 	return m
 end
 
@@ -285,7 +398,9 @@ for i = 1, POOL_SIZE do
 	makeEnemyRig("Enemy" .. i).Parent = poolFolder
 end
 poolFolder:SetAttribute("TotalCreated", POOL_SIZE)
-print("[One Way Caravan: Nightfall] Pool de inimigos criado: " .. POOL_SIZE .. " instancias (criadas 1x no boot, reusadas entre ondas)")
+bossModel = makeBossRig()
+bossModel.Parent = ServerStorage
+print("[One Way Caravan: Nightfall] Pool de inimigos criado: " .. POOL_SIZE .. " instancias + 1 boss (criados 1x no boot, reusados)")
 
 local function countActive()
 	local n = 0
@@ -307,7 +422,7 @@ local function pickSpawnBase()
 end
 
 local function activateEnemy(e, idx, basePos)
-	e:SetAttribute("HP", ENEMY_MAX_HP)
+	e:SetAttribute("HP", e:GetAttribute("MaxHP") or ENEMY_MAX_HP)
 	e:SetAttribute("LastAttack", 0)
 	e:SetAttribute("TimesSpawned", (e:GetAttribute("TimesSpawned") or 0) + 1)
 	local x = basePos.X + ((idx % 3) - 1) * 4
@@ -327,7 +442,12 @@ end
 
 local function returnToPool(e)
 	activeEnemies[e] = nil
-	e.Parent = poolFolder
+	if e == bossModel then
+		e.Parent = ServerStorage
+		RS:SetAttribute("BossHP", 0)
+	else
+		e.Parent = poolFolder
+	end
 	syncEnemiesAlive()
 end
 
@@ -340,7 +460,7 @@ local function despawnAll()
 		returnToPool(e)
 	end
 	if #list > 0 then
-		print("[One Way Caravan: Nightfall] Amanheceu: " .. #list .. " inimigos retornaram ao pool")
+		print("[One Way Caravan: Nightfall] " .. #list .. " inimigos retornaram ao pool")
 	end
 end
 
@@ -356,7 +476,8 @@ local function spawnWave(waveIdx, count)
 		activateEnemy(e, i, basePos)
 		spawned += 1
 	end
-	print(string.format("[One Way Caravan: Nightfall] Onda %d: %d inimigos ativados do pool (pool restante: %d, ativos: %d)", waveIdx, spawned, #poolFolder:GetChildren(), countActive()))
+	local label = waveIdx > 0 and ("Onda " .. waveIdx) or "Reforços do covil"
+	print(string.format("[One Way Caravan: Nightfall] %s: %d inimigos ativados do pool (pool restante: %d, ativos: %d)", label, spawned, #poolFolder:GetChildren(), countActive()))
 end
 
 -- ===== morte de inimigo =====
@@ -384,23 +505,25 @@ local function makeDowned(plr, char, hum)
 	hum.JumpPower = 0
 	hum.PlatformStand = true
 	local hrp = char:FindFirstChild("HumanoidRootPart")
-	if not hrp then return end
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = "RevivePrompt"
-	prompt.ActionText = "Reviver"
-	prompt.ObjectText = plr.Name
-	prompt.HoldDuration = 4
-	prompt.RequiresLineOfSight = false
-	prompt.MaxActivationDistance = 8
-	prompt.Parent = hrp
-	prompt.Triggered:Connect(function(reviver)
-		-- reanimar é ação de colega; solo (1 jogador) pode se auto-reanimar p/ não travar a run
-		if reviver ~= plr or #Players:GetPlayers() == 1 then
-			revive(plr, char, hum, prompt)
-		end
-	end)
+	if hrp then
+		local prompt = Instance.new("ProximityPrompt")
+		prompt.Name = "RevivePrompt"
+		prompt.ActionText = "Reviver"
+		prompt.ObjectText = plr.Name
+		prompt.HoldDuration = 4
+		prompt.RequiresLineOfSight = false
+		prompt.MaxActivationDistance = 8
+		prompt.Parent = hrp
+		prompt.Triggered:Connect(function(reviver)
+			-- reanimar é ação de colega; solo (1 jogador) pode se auto-reanimar p/ não travar a run
+			if reviver ~= plr or #Players:GetPlayers() == 1 then
+				revive(plr, char, hum, prompt)
+			end
+		end)
+	end
 	playerDownedRE:FireAllClients(plr.Name)
 	print("[One Way Caravan: Nightfall] " .. plr.Name .. " caiu — segure o botão de reviver por perto")
+	checkWipe()
 end
 
 -- ===== IA de inimigo (doc 4.8: alvo = jogador vivo mais próximo, repath com throttle) =====
@@ -437,7 +560,8 @@ local function blockingBarricade(fromPos, toPos)
 end
 
 local function attackReady(e)
-	if os.clock() - (e:GetAttribute("LastAttack") or 0) < ENEMY_ATTACK_COOLDOWN then
+	local cooldown = e:GetAttribute("AttackCooldown") or ENEMY_ATTACK_COOLDOWN
+	if os.clock() - (e:GetAttribute("LastAttack") or 0) < cooldown then
 		return false
 	end
 	e:SetAttribute("LastAttack", os.clock())
@@ -446,8 +570,9 @@ end
 
 local function tryAttackBarricade(e, barr)
 	if not attackReady(e) then return end
+	local dmg = e:GetAttribute("BarricadeDmg") or ENEMY_DMG_BARRICADE
 	local maxHp = barr:GetAttribute("MaxHP") or BARRICADE_HP
-	local hp = (barr:GetAttribute("HP") or 0) - ENEMY_DMG_BARRICADE
+	local hp = (barr:GetAttribute("HP") or 0) - dmg
 	barr:SetAttribute("HP", hp)
 	local body = barr.PrimaryPart
 	if body then
@@ -464,10 +589,11 @@ local function tryAttackPlayer(e, char)
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	local plr = Players:GetPlayerFromCharacter(char)
 	if not (hum and plr) or plr:GetAttribute("Downed") then return end
-	if hum.Health - ENEMY_DMG_PLAYER <= DOWNED_HP then
+	local dmg = e:GetAttribute("Dmg") or ENEMY_DMG_PLAYER
+	if hum.Health - dmg <= DOWNED_HP then
 		makeDowned(plr, char, hum)
 	else
-		hum:TakeDamage(ENEMY_DMG_PLAYER)
+		hum:TakeDamage(dmg)
 	end
 end
 
@@ -477,6 +603,7 @@ local function stepEnemy(e)
 	if not (hum and hrp) then return end
 	local targetHrp = nearestTarget(hrp.Position)
 	local targetPos = targetHrp and targetHrp.Position or campPos()
+	local range = e:GetAttribute("AttackRange") or ENEMY_ATTACK_RANGE
 
 	-- funil do canyon (se a zona tiver um): linha reta cruza a crista fora da passagem -> mira a passagem
 	local desired = targetPos
@@ -494,7 +621,7 @@ local function stepEnemy(e)
 
 	local barr, hitPos = blockingBarricade(hrp.Position, desired)
 	if barr and hitPos then
-		if (hitPos - hrp.Position).Magnitude <= ENEMY_ATTACK_RANGE + 1 then
+		if (hitPos - hrp.Position).Magnitude <= range + 1 then
 			hum:MoveTo(hrp.Position) -- parado atacando a barricada
 			tryAttackBarricade(e, barr)
 		else
@@ -502,7 +629,7 @@ local function stepEnemy(e)
 		end
 	else
 		hum:MoveTo(desired)
-		if desired == targetPos and targetHrp and (targetHrp.Position - hrp.Position).Magnitude <= ENEMY_ATTACK_RANGE then
+		if desired == targetPos and targetHrp and (targetHrp.Position - hrp.Position).Magnitude <= range then
 			tryAttackPlayer(e, targetHrp.Parent)
 		end
 	end
@@ -635,6 +762,9 @@ damageRE.OnServerEvent:Connect(function(plr)
 	if not nearest then return end
 	local hp = (nearest:GetAttribute("HP") or 0) - WEAPON_DMG
 	nearest:SetAttribute("HP", hp)
+	if nearest == bossModel then
+		RS:SetAttribute("BossHP", math.max(hp, 0))
+	end
 	if hp <= 0 then
 		killEnemy(nearest, plr)
 	end
@@ -718,6 +848,7 @@ end
 
 local function phaseCountdown(seconds)
 	for t = math.ceil(seconds), 1, -1 do
+		if runState.defeated then return end
 		RS:SetAttribute("PhaseTimeLeft", t)
 		task.wait(1)
 	end
@@ -748,6 +879,7 @@ local function nightPhase(waveBonus)
 	local waveIdx = 1
 	local t0 = os.clock()
 	while true do
+		if runState.defeated then break end
 		local elapsed = os.clock() - t0
 		if elapsed >= NIGHT_LENGTH then break end
 		RS:SetAttribute("PhaseTimeLeft", math.ceil(NIGHT_LENGTH - elapsed))
@@ -759,6 +891,12 @@ local function nightPhase(waveBonus)
 		task.wait(0.5)
 	end
 	despawnAll()
+	if not runState.defeated then
+		-- recompensa fixa por noite sobrevivida, travada no valor-base (doc 5.4/5.8)
+		runCurrency += NIGHT_REWARD
+		syncCurrency()
+		announce("Noite sobrevivida! +" .. NIGHT_REWARD .. " de moeda pro grupo (total: " .. runCurrency .. ").")
+	end
 end
 
 local function fullDay(skipDawn)
@@ -879,46 +1017,143 @@ local function travelTo(node)
 	task.wait(0.5)
 end
 
--- ===== loop da run =====
+-- ===== boss (passo 8): a ameaça sai do covil e vem pelo funil =====
+local function bossPhase()
+	RS:SetAttribute("Phase", "Boss")
+	RS:SetAttribute("PhaseTimeLeft", 0)
+	applyNightAmbience()
+	transitionClock(12, 24, 5)
+	announce("Algo enorme desperta no covil. Segurem a linha!")
+
+	bossModel:SetAttribute("HP", BOSS_HP)
+	bossModel:SetAttribute("LastAttack", 0)
+	RS:SetAttribute("BossMaxHP", BOSS_HP)
+	RS:SetAttribute("BossHP", BOSS_HP)
+	bossModel:PivotTo(CFrame.new(0, 5, 142)) -- na boca do covil, atrás do funil
+	bossModel.Parent = enemiesFolder
+	local hrp = bossModel.PrimaryPart
+	if hrp then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		pcall(function()
+			hrp:SetNetworkOwner(nil)
+		end)
+	end
+	activeEnemies[bossModel] = true
+	syncEnemiesAlive()
+
+	local nextAdds = os.clock() + BOSS_ADDS_INTERVAL
+	while true do
+		task.wait(0.5)
+		if runState.defeated then
+			return false
+		end
+		if not activeEnemies[bossModel] then
+			-- boss morto: recompensa + checkpoint (doc 5.8: cada boss salva a moeda acumulada)
+			runCurrency += BOSS_REWARD
+			checkpointCurrency = runCurrency
+			syncCurrency()
+			announce("Boss derrotado! +" .. BOSS_REWARD .. " de moeda. Checkpoint salvo: " .. checkpointCurrency .. ".")
+			return true
+		end
+		if os.clock() >= nextAdds then
+			spawnWave(0, BOSS_ADDS_COUNT)
+			nextAdds = os.clock() + BOSS_ADDS_INTERVAL
+		end
+		RS:SetAttribute("BossHP", math.max(bossModel:GetAttribute("HP") or 0, 0))
+	end
+end
+
+-- ===== fim de run (doc 4.4/5.8: vitória = total; derrota = o que estava salvo no checkpoint) =====
+local function endRun(victory)
+	despawnAll()
+	local earned = victory and runCurrency or checkpointCurrency
+	RS:SetAttribute("Phase", victory and "Vitória" or "Derrota")
+	RS:SetAttribute("PhaseTimeLeft", 0)
+	runEndedRE:FireAllClients({
+		victory = victory,
+		nights = nightCount,
+		currency = runCurrency,
+		checkpoint = checkpointCurrency,
+		earned = earned,
+	})
+	if victory then
+		announce("VITÓRIA! A caravana cruzou a rota. Moeda garantida pro grupo: " .. earned .. " (vira perfil no passo 9).")
+	else
+		announce("Fim da run. Moeda salva no último checkpoint: " .. earned .. ". Nova tentativa em " .. RUN_RESTART_DELAY .. "s...")
+	end
+	task.wait(RUN_RESTART_DELAY)
+end
+
+local function resetPlayersForNewRun()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local r = resources[plr]
+		if r then
+			r.Wood, r.Food = 0, 0
+			plr:SetAttribute("Wood", 0)
+			plr:SetAttribute("Food", 0)
+		end
+		plr:SetAttribute("Downed", false)
+		pcall(function()
+			plr:LoadCharacter()
+		end)
+	end
+end
+
+-- ===== loop de runs =====
 task.spawn(function()
 	ZoneBuilder.buildCaravana()
-	local graph = RouteGraph.generate()
-	local node = graph.nodes[graph.currentId]
-	CurrentZone = ZoneBuilder.buildPOI(node.kind)
-	ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
-	RS:SetAttribute("NodeName", node.label)
-	RS:SetAttribute("Cycle", 0)
-	RS:SetAttribute("EnemiesAlive", 0)
-	task.wait(1)
-	teleportPlayersBehindCaravana()
-
-	local stays = 0 -- noites extras consecutivas neste POI (doc 5.4: reseta ao avançar)
-	local needFullDay = true
-	local skipDawn = true
 	while true do
-		if needFullDay then
-			fullDay(skipDawn)
-			skipDawn = false
-		end
-		nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
-		local decision = runVote(node, graph)
-		if decision == "stay" then
-			stays += 1
-			needFullDay = true
-			announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
-		else
-			stays = 0
-			node = graph.nodes[decision]
-			graph.currentId = decision
-			travelTo(node)
-			if node.kind == "boss" then
-				RS:SetAttribute("Phase", "FimDaRota")
-				RS:SetAttribute("PhaseTimeLeft", 0)
-				announce("Vocês chegaram ao " .. node.label .. "! O boss e o fim de run entram no passo 8 do build.")
-				break
+		-- setup da run (caravana e upgrades dela são ativo local da run, doc 5.3)
+		runCurrency, checkpointCurrency, nightCount = 0, 0, 0
+		syncCurrency()
+		RS:SetAttribute("BossHP", 0)
+		RS:SetAttribute("Cycle", 0)
+		RS:SetAttribute("EnemiesAlive", 0)
+		local graph = RouteGraph.generate()
+		local node = graph.nodes[graph.currentId]
+		CurrentZone = ZoneBuilder.buildPOI(node.kind)
+		ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
+		RS:SetAttribute("NodeName", node.label)
+		resetPlayersForNewRun()
+		task.wait(1)
+		teleportPlayersBehindCaravana()
+		runState.defeated = false
+		runState.active = true
+
+		local victory = false
+		local stays = 0 -- noites extras consecutivas neste POI (doc 5.4: reseta ao avançar)
+		local needFullDay = true
+		local skipDawn = true
+		while true do
+			if needFullDay then
+				fullDay(skipDawn)
+				skipDawn = false
 			end
-			needFullDay = false -- a noite cai na chegada (doc 4.5, etapa 3)
+			if runState.defeated then break end
+			nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
+			if runState.defeated then break end
+			local decision = runVote(node, graph)
+			if runState.defeated then break end
+			if decision == "stay" then
+				stays += 1
+				needFullDay = true
+				announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
+			else
+				stays = 0
+				node = graph.nodes[decision]
+				graph.currentId = decision
+				travelTo(node)
+				if runState.defeated then break end
+				if node.kind == "boss" then
+					victory = bossPhase()
+					break
+				end
+				needFullDay = false -- a noite cai na chegada (doc 4.5, etapa 3)
+			end
 		end
+
+		runState.active = false
+		endRun(victory)
 	end
 end)
 

@@ -16,6 +16,7 @@ local voteUpdateRE = remotes:WaitForChild("VoteUpdate")
 local voteEndedRE = remotes:WaitForChild("VoteEnded")
 local zoneFadeRE = remotes:WaitForChild("ZoneFade")
 local announceRE = remotes:WaitForChild("Announce")
+local runEndedRE = remotes:WaitForChild("RunEnded")
 local mouse = plr:GetMouse()
 
 -- espelhos p/ feedback visual; a validação real é sempre do servidor
@@ -55,11 +56,38 @@ local phaseLbl = mkLabel("Phase", UDim2.new(0.5, -110, 0, 8), UDim2.new(0, 220, 
 local nodeLbl = mkLabel("Node", UDim2.new(0.5, -110, 0, 48), UDim2.new(0, 220, 0, 22))
 nodeLbl.BackgroundTransparency = 0.5
 local resLbl = mkLabel("Resources", UDim2.new(0, 8, 0, 8), UDim2.new(0, 240, 0, 36))
+local coinLbl = mkLabel("Coins", UDim2.new(0, 8, 0, 48), UDim2.new(0, 240, 0, 26))
+coinLbl.BackgroundColor3 = Color3.fromRGB(70, 60, 20)
 local enemiesLbl = mkLabel("Enemies", UDim2.new(1, -168, 0, 8), UDim2.new(0, 160, 0, 30))
 enemiesLbl.BackgroundColor3 = Color3.fromRGB(70, 25, 25)
 enemiesLbl.Visible = false
-local msgLbl = mkLabel("Msg", UDim2.new(0.5, -220, 0, 74), UDim2.new(0, 440, 0, 26))
+local msgLbl = mkLabel("Msg", UDim2.new(0.5, -220, 0, 100), UDim2.new(0, 440, 0, 26))
 msgLbl.BackgroundTransparency = 1
+
+-- barra de HP do boss
+local bossBar = Instance.new("Frame")
+bossBar.Name = "BossBar"
+bossBar.AnchorPoint = Vector2.new(0.5, 0)
+bossBar.Position = UDim2.new(0.5, 0, 0, 74)
+bossBar.Size = UDim2.new(0, 300, 0, 22)
+bossBar.BackgroundColor3 = Color3.fromRGB(25, 10, 10)
+bossBar.Visible = false
+bossBar.Parent = gui
+round(bossBar)
+local bossFill = Instance.new("Frame")
+bossFill.Size = UDim2.new(1, 0, 1, 0)
+bossFill.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+bossFill.BorderSizePixel = 0
+bossFill.Parent = bossBar
+round(bossFill)
+local bossTxt = Instance.new("TextLabel")
+bossTxt.Size = UDim2.new(1, 0, 1, 0)
+bossTxt.BackgroundTransparency = 1
+bossTxt.TextColor3 = Color3.new(1, 1, 1)
+bossTxt.TextScaled = true
+bossTxt.Font = Enum.Font.SourceSansBold
+bossTxt.ZIndex = 2
+bossTxt.Parent = bossBar
 
 local BTN_COLORS = {
 	BuildFire = Color3.fromRGB(50, 70, 50),
@@ -106,7 +134,9 @@ local PHASE_COLORS = {
 	Partida = Color3.fromRGB(90, 65, 25),
 	Travessia = Color3.fromRGB(90, 65, 25),
 	Chegada = Color3.fromRGB(90, 65, 25),
-	FimDaRota = Color3.fromRGB(25, 70, 40),
+	Boss = Color3.fromRGB(90, 20, 20),
+	["Vitória"] = Color3.fromRGB(25, 70, 40),
+	Derrota = Color3.fromRGB(60, 25, 25),
 }
 
 local function refreshPhase()
@@ -117,8 +147,12 @@ local function refreshPhase()
 		phaseLbl.Text = string.format("Dia %d — %ds", cycle + 1, t)
 	elseif phase == "Noite" then
 		phaseLbl.Text = string.format("Noite %d — %ds", cycle, t)
-	elseif phase == "FimDaRota" then
-		phaseLbl.Text = "Fim da rota!"
+	elseif phase == "Boss" then
+		phaseLbl.Text = "BOSS — segurem a linha!"
+	elseif phase == "Vitória" then
+		phaseLbl.Text = "Vitória!"
+	elseif phase == "Derrota" then
+		phaseLbl.Text = "Derrota"
 	else
 		phaseLbl.Text = string.format("%s — %ds", phase, t)
 	end
@@ -143,6 +177,26 @@ local function refreshEnemies()
 end
 RS:GetAttributeChangedSignal("EnemiesAlive"):Connect(refreshEnemies)
 refreshEnemies()
+
+local function refreshCoins()
+	coinLbl.Text = string.format("Moeda: %d | Salva: %d", RS:GetAttribute("Currency") or 0, RS:GetAttribute("CheckpointCurrency") or 0)
+end
+RS:GetAttributeChangedSignal("Currency"):Connect(refreshCoins)
+RS:GetAttributeChangedSignal("CheckpointCurrency"):Connect(refreshCoins)
+refreshCoins()
+
+local function refreshBoss()
+	local hp = RS:GetAttribute("BossHP") or 0
+	local maxHp = RS:GetAttribute("BossMaxHP") or 1
+	bossBar.Visible = hp > 0
+	if hp > 0 then
+		bossFill.Size = UDim2.new(math.clamp(hp / maxHp, 0, 1), 0, 1, 0)
+		bossTxt.Text = string.format("Boss: %d / %d", hp, maxHp)
+	end
+end
+RS:GetAttributeChangedSignal("BossHP"):Connect(refreshBoss)
+RS:GetAttributeChangedSignal("BossMaxHP"):Connect(refreshBoss)
+refreshBoss()
 
 -- ===== votação de avanço/permanência =====
 local voteFrame = Instance.new("Frame")
@@ -234,6 +288,47 @@ announceRE.OnClientEvent:Connect(function(text)
 	msgLbl.Text = text
 	task.delay(6, function()
 		if msgLbl.Text == text then msgLbl.Text = "" end
+	end)
+end)
+
+-- ===== tela de fim de run =====
+local endFrame = Instance.new("Frame")
+endFrame.Name = "RunEnd"
+endFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+endFrame.Position = UDim2.new(0.5, 0, 0.45, 0)
+endFrame.Size = UDim2.new(0, 400, 0, 190)
+endFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+endFrame.BackgroundTransparency = 0.1
+endFrame.Visible = false
+endFrame.Parent = gui
+round(endFrame)
+local endTitle = Instance.new("TextLabel")
+endTitle.Position = UDim2.new(0, 8, 0, 10)
+endTitle.Size = UDim2.new(1, -16, 0, 44)
+endTitle.BackgroundTransparency = 1
+endTitle.TextScaled = true
+endTitle.Font = Enum.Font.SourceSansBold
+endTitle.Parent = endFrame
+local endBody = Instance.new("TextLabel")
+endBody.Position = UDim2.new(0, 16, 0, 60)
+endBody.Size = UDim2.new(1, -32, 1, -72)
+endBody.BackgroundTransparency = 1
+endBody.TextColor3 = Color3.new(1, 1, 1)
+endBody.TextSize = 20
+endBody.TextWrapped = true
+endBody.TextYAlignment = Enum.TextYAlignment.Top
+endBody.Font = Enum.Font.SourceSans
+endBody.Parent = endFrame
+
+runEndedRE.OnClientEvent:Connect(function(data)
+	endTitle.Text = data.victory and "VITÓRIA!" or "A CARAVANA SE PERDEU"
+	endTitle.TextColor3 = data.victory and Color3.fromRGB(120, 230, 140) or Color3.fromRGB(230, 100, 90)
+	endBody.Text = string.format(
+		"Noites sobrevividas: %d\nMoeda da run: %d | Checkpoint: %d\nMoeda garantida pro grupo: %d\n\nNova run em instantes...",
+		data.nights or 0, data.currency or 0, data.checkpoint or 0, data.earned or 0)
+	endFrame.Visible = true
+	task.delay(16, function()
+		endFrame.Visible = false
 	end)
 end)
 

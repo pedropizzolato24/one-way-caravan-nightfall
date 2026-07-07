@@ -6,7 +6,24 @@ Design completo em [docs/OneWayCaravanNightfall_Roblox_Design_Doc_v2.md](docs/On
 
 ## Status
 
-**Passos 1–7 da ordem de build (Seção 6) implementados.**
+**Passos 1–8 da ordem de build (Seção 6) implementados.**
+
+Passo 8 (boss, checkpoint, vitória/derrota, moeda):
+
+- **Boss no Covil**: chegar ao nó do boss inicia a luta — a criatura (600 HP, dano 25, quebra
+  barricada rápido) sai do covil e vem pelo funil, com reforços do pool a cada 40s. Barra de HP
+  do boss no HUD. Stats de combate por inimigo agora vivem em atributos do rig (base pra variar
+  inimigos depois).
+- **Vitória/derrota** (doc 5.4/5.8): matar o boss = vitória; grupo inteiro caído (todos downed ou
+  mortos) = derrota, verificada a cada queda/morte/saída de jogador e interrompendo qualquer fase.
+- **Economia de run** (doc 5.8, valores de exemplo do doc): noite sobrevivida = +10 pro grupo
+  (fixo no valor-base do POI, noites extras não pagam mais); boss = +20 e **checkpoint** (salva a
+  moeda acumulada). Vitória consolida o total; derrota consolida o que estava salvo no último
+  checkpoint. HUD mostra `Moeda | Salva`. A moeda é estado volátil do servidor da run (doc 4.4) —
+  virar perfil persistente (ProfileStore) é o passo 9.
+- **Tela de fim de run** com resumo (noites, moeda, garantido) e **reinício automático** da run
+  15s depois (grafo novo, zona 1 reconstruída, jogadores respawnados) — no jogo real isso vira
+  volta pro lobby no passo 9.
 
 Passo 7 (grafo de rota + travessia + votação):
 
@@ -37,8 +54,8 @@ server-side validada com rate-limit, recursos repõem por amanhecer, fogueira/ba
 fantasma e orientação pelo jogador, comida cura, machado + inimigos com HP server-side e object
 pooling (24 instâncias), downed/revive hold-button, IA com desvio pelo funil, anti speed/teleport.
 
-Próximos passos (Seção 6): boss + checkpoint + vitória/derrota (passo 8), meta-loop do lobby com
-ProfileStore (passo 9), playtest em device alvo (passo 10).
+Próximos passos (Seção 6): meta-loop do lobby com ProfileStore e catálogo de 1 unlock lateral
+(passo 9), playtest em device alvo pra fechar densidade/caps/taxas (passo 10).
 
 ## Estrutura
 
@@ -62,11 +79,13 @@ Preview de zona no modo Edit (opcional, com Rojo conectado):
 
 ## Fluxo de uma run (MVP)
 
-1. Dia 1 na Estação (90s) → Noite 1 (3 ondas) → votação.
-2. Ficar = mais um dia/noite no mesmo POI com +1 inimigo/onda por noite extra.
+1. Dia 1 na Estação (90s) → Noite 1 (3 ondas) → votação. Noite sobrevivida = +10 de moeda.
+2. Ficar = mais um dia/noite no mesmo POI com +1 inimigo/onda por noite extra (moeda não sobe).
 3. Avançar = manhã de 40s → caravana parte → travessia → chegada no próximo POI → noite na chegada.
 4. No fork, a votação oferece Planície (segura) ou Mina (arriscada, +1 de dificuldade à noite).
-5. Estação → fork → Acampamento Dizimado → Covil (fim da rota; boss no passo 8).
+5. Estação → fork → Acampamento Dizimado → Covil: o boss sai do covil pelo funil.
+6. Boss morto = +20, checkpoint e vitória (moeda total). Grupo inteiro caído a qualquer momento =
+   derrota (fica só a moeda do checkpoint). Tela de resumo e nova run em 15s.
 
 ## Layout de POI (referência rápida)
 
@@ -77,7 +96,7 @@ Preview de zona no modo Edit (opcional, com Rojo conectado):
 
 ## Bugs conhecidos / dívidas
 
-- Sem condição de derrota (grupo inteiro downed) e sem checkpoint/moeda — chegam no passo 8.
+- Moeda ainda não persiste entre servidores (ProfileStore no passo 9); no fim da run ela é só exibida.
 - Estruturas podem sobrepor jogadores/inimigos; caravana atravessa estruturas construídas fora da estrada durante a partida.
 - Colocação usa mouse; em touch funciona por tap, mas sem UX dedicada de mobile (passo 10).
 - Inimigo é MoveTo direto (sem PathfindingService); pode travar em quina fora do funil — aceito pelo doc 4.8.
