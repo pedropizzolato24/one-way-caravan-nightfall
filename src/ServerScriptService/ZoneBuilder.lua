@@ -444,9 +444,10 @@ local function buildPOI(kind, id, center, gates)
 		center = center,
 		-- limites físicos do POI (decidem permanência vs avanço no amanhecer, doc 5.4 rev.3)
 		bounds = { minX = ox - HALF, maxX = ox + HALF, minZ = oz - HALF, maxZ = oz + HALF },
-		-- faixa de chegada logo depois do portão sul (volume de trigger checado por poll no servidor:
-		-- .Touched não é confiável com StreamingEnabled + física no cliente do motorista)
-		arrivalRect = { minX = ox - 34, maxX = ox + 34, minZ = oz - HALF + 26, maxZ = oz - HALF + 60 },
+		-- volume de chegada em torno do acampamento: o gatilho dispara quando o grupo leva a
+		-- caravana até o camp (não já no portão), então ela para perto do funil, não no sul distante.
+		-- Checado por poll no servidor (.Touched não é confiável com StreamingEnabled + física no cliente)
+		arrivalRect = { minX = ox - 40, maxX = ox + 40, minZ = oz + CAMP_Z - 24, maxZ = oz + CAMP_Z + 30 },
 		campCf = CFrame.new(ox, CARAVAN_Y, oz + CAMP_Z),
 		campPos = Vector3.new(ox, 0, oz + CAMP_Z),
 		spawnPos = Vector3.new(ox - 16, 0.5, oz - 42),

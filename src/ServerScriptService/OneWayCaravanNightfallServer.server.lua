@@ -19,10 +19,9 @@ local RouteGraph = require(script.Parent.RouteGraph)
 local ProfileManager = require(script.Parent.ProfileManager)
 
 -- ===== config =====
-local DAY_LENGTH = 90 -- dia (usado nas noites de permanência; a 1ª noite num POI usa PREP_LENGTH)
+local DAY_LENGTH = 90 -- janela de dia livre pós-noite: se ficarem no POI até acabar, a noite volta
 local PREP_LENGTH = 60 -- janela de preparação ao chegar num POI novo, antes da noite [placeholder]
 local NIGHT_LENGTH = 120
-local VOTE_LENGTH = 20
 local CARAVAN_SANITY_SPEED = 60 -- teto de velocidade horizontal da caravana (anti-exploit do motorista)
 -- limites do mundo contínuo (layout fixo do MVP no ZoneBuilder); sanity-check de colocação
 local WORLD_BOUNDS = { minX = -700, maxX = 700, minZ = -300, maxZ = 2760 }
@@ -79,7 +78,7 @@ local BARRICADE_COLOR_BROKEN = Color3.fromRGB(70, 45, 25)
 local CATALOG = {
 	BarricadaReforcada = { name = "Barricada Reforçada", price = 40 },
 }
-local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Vote = 0.2, Buy = 0.5 } -- doc 4.1
+local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Buy = 0.5 } -- doc 4.1
 
 -- zona atual (funil, posições da caravana); preenchida pelo loop da run
 local CurrentZone = nil
@@ -110,10 +109,6 @@ local placeRE = ensureRemote("PlaceStructure")
 local eatRE = ensureRemote("EatFood")
 local enemyDiedRE = ensureRemote("EnemyDied")
 local playerDownedRE = ensureRemote("PlayerDowned")
-local voteStartedRE = ensureRemote("VoteStarted")
-local voteCastRE = ensureRemote("VoteCast")
-local voteUpdateRE = ensureRemote("VoteUpdate")
-local voteEndedRE = ensureRemote("VoteEnded")
 local zoneFadeRE = ensureRemote("ZoneFade")
 local announceRE = ensureRemote("Announce")
 local runEndedRE = ensureRemote("RunEnded")
@@ -380,21 +375,6 @@ local function tryForkCommit()
 	end
 end
 
--- espera a caravana entrar na faixa de chegada de um POI diferente do atual (volume de trigger
--- checado por poll server-side); nil se a run acabou antes. Checa o commit de fork no caminho.
-local function waitArrival(currentId)
-	while not runState.defeated do
-		tryForkCommit()
-		local p = campPos()
-		for id, zone in pairs(RunWorld.zones) do
-			if id ~= currentId and not ZoneBuilder.isGroupDestroyed(id) and rectContains(zone.arrivalRect, p) then
-				return id
-			end
-		end
-		task.wait(0.3)
-	end
-	return nil
-end
 
 -- ===== pool de inimigos (doc 4.7: object pooling obrigatório, nunca Instantiate/Destroy por onda) =====
 local poolFolder = Instance.new("Folder")
@@ -1000,22 +980,6 @@ buyRE.OnServerEvent:Connect(function(plr, itemId)
 	end
 end)
 
--- ===== votação de avanço/permanência (doc 5.4) =====
-local currentVote = nil -- { valid = {id=label}, votes = {[player]=id} }
-
-voteCastRE.OnServerEvent:Connect(function(plr, id)
-	if not rateOk(plr, "Vote") then return end
-	if not currentVote then return end
-	if type(id) ~= "string" or not currentVote.valid[id] then return end
-	currentVote.votes[plr] = id
-	local counts = {}
-	for vid in pairs(currentVote.valid) do counts[vid] = 0 end
-	for p, v in pairs(currentVote.votes) do
-		if p.Parent then counts[v] += 1 end
-	end
-	voteUpdateRE:FireAllClients(counts)
-end)
-
 -- ===== ambiente / fases =====
 local function applyDayAmbience()
 	Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
@@ -1040,14 +1004,6 @@ local function transitionClock(from, to, dur)
 	for i = 1, steps do
 		Lighting.ClockTime = (from + (to - from) * i / steps) % 24
 		task.wait(0.05)
-	end
-end
-
-local function phaseCountdown(seconds)
-	for t = math.ceil(seconds), 1, -1 do
-		if runState.defeated then return end
-		RS:SetAttribute("PhaseTimeLeft", t)
-		task.wait(1)
 	end
 end
 
@@ -1153,89 +1109,58 @@ local function preparationPhase()
 	end
 end
 
--- dia comum (noites de permanência): amanhece de verdade e roda o timer cheio; sem convocação
-local function fullDay(skipDawn)
-	RS:SetAttribute("Phase", "Dia")
-	applyDayAmbience()
-	if skipDawn then
-		Lighting.ClockTime = 12
-	else
-		transitionClock(0, 12, 5)
-	end
-	respawnResources()
-	print("[One Way Caravan: Nightfall] === DIA (noites sobrevividas: " .. nightCount .. ") ===")
-	phaseCountdown(DAY_LENGTH)
-end
-
--- Votação stay/avançar (doc 5.4). No mundo contínuo o "para qual fork" deixou de ser opção de
--- voto: a escolha do ramo é física (dirigir até o POI, passo 4). O voto só decide ficar x avançar;
--- o passo 6 remove a votação inteira, trocando por posição da caravana.
-local function runVote()
-	local options = {
-		{ id = "stay", label = "Ficar mais uma noite" },
-		{ id = "advance", label = "Avançar pela estrada" },
-	}
-	local valid = {}
-	for _, o in ipairs(options) do
-		valid[o.id] = o.label
-	end
-	currentVote = { valid = valid, votes = {} }
-	RS:SetAttribute("Phase", "Votação")
-	voteStartedRE:FireAllClients(options, VOTE_LENGTH)
-	announce("Enquanto o grupo dorme: avançar ou ficar? (maioria decide; host desempata; sem votos, avança)")
-	phaseCountdown(VOTE_LENGTH)
-
-	-- apuração: maioria simples; empate → voto do host; host ausente/sem voto → default avançar (doc 5.4)
-	local counts = {}
-	for _, o in ipairs(options) do counts[o.id] = 0 end
-	for p, v in pairs(currentVote.votes) do
-		if p.Parent and counts[v] then counts[v] += 1 end
-	end
-	local bestN = -1
-	local tied = {}
-	for _, o in ipairs(options) do
-		local n = counts[o.id]
-		if n > bestN then
-			bestN = n
-			tied = { o.id }
-		elseif n == bestN then
-			table.insert(tied, o.id)
-		end
-	end
-	local decision
-	if bestN > 0 and #tied == 1 then
-		decision = tied[1]
-	else
-		local host = joinOrder[1]
-		local hostVote = host and currentVote.votes[host]
-		if hostVote and (bestN == 0 or table.find(tied, hostVote)) then
-			decision = hostVote
-		else
-			decision = options[2] and options[2].id or "stay"
-		end
-	end
-	voteEndedRE:FireAllClients(valid[decision])
-	currentVote = nil
-	return decision
-end
-
--- ===== travessia no mundo contínuo (doc 4.5/4.6 rev.3) =====
--- Sem fade, sem teleporte, sem troca de zona: o grupo simplesmente dirige a caravana pela
--- estrada até a faixa de chegada do próximo POI. Retorna o id do POI alcançado (nil = derrota).
-local function driveToNextPOI(currentId)
-	RS:SetAttribute("Phase", "Travessia")
-	RS:SetAttribute("PhaseTimeLeft", 0)
-	-- abre caminho: estruturas plantadas na estrada do POI atual são desmontadas
-	local cx = (CurrentZone.center and CurrentZone.center.X) or 0
+-- desmonta as estruturas plantadas na estrada do POI atual pra caravana poder passar
+local function clearRoadStructures()
+	local cx = (CurrentZone and CurrentZone.center and CurrentZone.center.X) or 0
 	for _, s in ipairs(structuresFolder:GetChildren()) do
 		local pp = s.PrimaryPart
 		if pp and math.abs(pp.Position.X - cx) < 8 then
 			s:Destroy()
 		end
 	end
-	announce("Subam na caravana e dirijam pro próximo ponto. A estrada é de mão única.")
-	ZoneBuilder.setCaravanaLocked(false)
-	return waitArrival(currentId)
+end
+
+-- ===== dia livre + decisão implícita por posição (passo 6, doc 5.4 rev.3) =====
+-- Substitui a votação: ao amanhecer a caravana DESTRAVA e o grupo é livre. A posição física
+-- decide sem UI de voto — chegar num POI novo = avançar; ficar dentro dos limites do POI atual
+-- até o dia acabar = permanência. Retorna:
+--   "advance", <id>  -> chegaram fisicamente num POI novo
+--   "stay"           -> ficaram no POI atual até a noite voltar
+--   "defeated"       -> a run acabou durante o dia
+local function freeDayWindow(currentId)
+	RS:SetAttribute("Phase", "Dia")
+	applyDayAmbience()
+	transitionClock(0, 12, 5) -- amanhecer
+	respawnResources()
+	clearRoadStructures()
+	ZoneBuilder.setCaravanaLocked(false) -- livre pra dirigir (ou ficar parado no POI)
+	announce("Amanheceu. Fiquem por outra noite ou dirijam pro próximo ponto — a estrada decide.")
+
+	local dayStart = os.clock()
+	while not runState.defeated do
+		tryForkCommit()
+		local p = campPos()
+		-- chegou em POI novo? -> avançar (contador de permanência reseta no próximo POI)
+		for id, zone in pairs(RunWorld.zones) do
+			if id ~= currentId and not ZoneBuilder.isGroupDestroyed(id) and rectContains(zone.arrivalRect, p) then
+				return "advance", id
+			end
+		end
+		local remaining = DAY_LENGTH - (os.clock() - dayStart)
+		if remaining <= 0 then
+			-- o dia acabou: se a caravana ainda está no POI atual, é permanência; se saiu (em
+			-- trânsito), a noite espera até chegarem no próximo POI (doc 5.4: "já fora = avançou")
+			local cur = RunWorld.zones[currentId]
+			if cur and rectContains(cur.bounds, p) then
+				return "stay"
+			end
+			RS:SetAttribute("PhaseTimeLeft", 0)
+		else
+			RS:SetAttribute("PhaseTimeLeft", math.ceil(remaining))
+		end
+		task.wait(0.3)
+	end
+	return "defeated"
 end
 
 -- ===== boss (passo 8): a ameaça sai do covil e vem pelo funil =====
@@ -1388,47 +1313,51 @@ task.spawn(function()
 		runState.defeated = false
 		runState.active = true
 
+		-- ===== percurso do POI (passo 6: sem votação; permanência/avanço por posição) =====
+		-- Cada POI: janela de preparação (chegada) -> 1ª noite (base) -> loop de dia livre. No dia
+		-- livre a caravana destrava; ficar no POI até a noite voltar = permanência (+dificuldade,
+		-- recompensa base); dirigir até o próximo POI = avanço (contador reseta). Boss = terminal.
 		local victory = false
-		local stays = 0 -- noites extras consecutivas neste POI (doc 5.4: reseta ao avançar)
-		local atNewPOI = true -- chegar num POI novo abre a janela de preparação; ficar = dia comum
 		while true do
-			-- 1ª noite num POI: janela de preparação (gatilho do grupo). Permanência: dia comum.
-			if atNewPOI then
-				preparationPhase()
-			else
-				fullDay(false)
+			-- chegada: janela de preparação, depois a 1ª noite naquele POI (sem bônus de permanência)
+			preparationPhase()
+			if runState.defeated then break end
+			if node.kind == "boss" then
+				victory = bossPhase() -- o covil é a noite final; sem loop de permanência
+				break
 			end
+			nightfallCutscene()
 			if runState.defeated then break end
-			nightfallCutscene() -- sol se põe, lua sobe, caravana trava (nunca instantâneo na chegada)
+			nightPhase(POI_DIFFICULTY[node.kind] or 0)
 			if runState.defeated then break end
-			nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
-			if runState.defeated then break end
-			local decision = runVote()
-			if runState.defeated then break end
-			if decision == "stay" then
-				stays += 1
-				atNewPOI = false
-				announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
-			else
-				stays = 0
-				-- o grupo DIRIGE até o próximo POI; waitArrival detecta fisicamente onde chegaram
-				local arrivedId = driveToNextPOI(currentId)
-				if not arrivedId then break end -- derrota durante a viagem
-				currentId = arrivedId
-				CurrentZone = RunWorld.zones[currentId]
-				node = graph.nodes[currentId]
-				ZoneBuilder.setCaravanaLocked(true)
-				ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
-				RS:SetAttribute("NodeName", node.label)
-				announce("Chegando: " .. node.label .. ". A chegada abre o dia de preparação.")
-				if node.kind == "boss" then
-					-- covil também tem janela de preparação antes do confronto (doc 4.5/5.4)
-					preparationPhase()
-					if runState.defeated then break end
-					victory = bossPhase()
+
+			-- permanência vs avanço decidido pela posição da caravana (doc 5.4 rev.3)
+			local advanced = false
+			local stays = 0 -- noites extras neste POI; a recompensa fica travada no valor-base
+			while not runState.defeated do
+				local ev, arrivedId = freeDayWindow(currentId)
+				if ev == "advance" then
+					currentId = arrivedId
+					node = graph.nodes[currentId]
+					CurrentZone = RunWorld.zones[currentId]
+					ZoneBuilder.setCaravanaLocked(true)
+					ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
+					RS:SetAttribute("NodeName", node.label)
+					announce("Chegando: " .. node.label .. ". A chegada abre o dia de preparação.")
+					advanced = true
 					break
+				elseif ev == "stay" then
+					stays += 1
+					announce("Permanência: a noite que vem aqui é +" .. stays .. " de dificuldade (recompensa igual).")
+					nightfallCutscene()
+					if runState.defeated then break end
+					nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
+				else
+					break -- defeated
 				end
-				atNewPOI = true -- próximo POI: nova janela de preparação
+			end
+			if not advanced then
+				break -- derrota
 			end
 		end
 
