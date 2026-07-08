@@ -6,28 +6,45 @@ Design completo em [docs/OneWayCaravanNightfall_Roblox_Design_Doc_v2.md](docs/On
 
 ## Status
 
-**Passos 1–9 da ordem de build (Seção 6) implementados.**
+**Passos 1–9 da ordem de build (Seção 6) implementados, com o modelo de caravana e travessia
+reconstruído para a Revisão 3 do doc (seções 4.5/4.6/5.4).**
 
-Passo 9 (meta-loop: lobby, persistência, 1 unlock lateral):
+### Caravana e travessia (Revisão 3 — reconstrução)
 
-- **Lobby "Posto de Partida"**: entre runs, o grupo volta pra uma zona segura com a caravana
-  parada, catálogo (painel na direita da tela) e um poste "Iniciar expedição" (segurar E) que
-  dispara a próxima run. *Decisão de implementação:* o doc 4.2 pede 2 places com TeleportService,
-  mas teleporte entre places só funciona publicado — o lobby entra como zona/estado no mesmo place,
-  com perfil e catálogo já isolados em módulo pra separação física virar só troca de transporte.
-- **Persistência** (`ProfileManager`, doc 4.4): schema completo do doc, session-locking leve via
-  UpdateAsync, autosave, release no BindToClose, e modo memória automático no Studio sem API.
-  Interface estável pra trocar por ProfileStore (loleris) depois sem mexer no resto. A moeda vira
-  perfil **só no fim da run** (vitória = total; derrota = checkpoint), como o doc 4.4 manda.
-- **Catálogo com 1 unlock lateral** (doc 3.1/5.2): **Barricada Reforçada** — 400 HP com faixas de
-  metal, custo 16 madeira (sidegrade: aguenta mais, drena mais), preço 40 de moeda de perfil.
-  Compra validada no servidor (só no lobby, só com saldo, sem duplicar), replicada por atributo
-  `Unlock_*`, e o botão de construção aparece nas runs seguintes. **Isso fecha o ciclo completo
-  pela primeira vez**: coleta → defesa → rota → boss → moeda → perfil → unlock → próxima run.
+A caravana **não é mais NPC-driven** e o mundo **não é mais dividido em zonas isoladas com
+teleporte/fade**. O que mudou:
 
-**Revisão de gameplay (decisão do jogo, sobrepõe o doc 4.5 etapa 3):** ao chegar num novo POI, a
-noite NÃO cai mais imediatamente — a chegada abre um **dia de preparação** (coleta e construção)
-antes da primeira noite ali, inclusive no Covil antes do boss.
+- **Caravana pilotada de verdade** (doc 4.5): um `VehicleSeat` na boleia controla throttle/steer;
+  3 `Seat` comuns de passageiro. O rig é um assembly único soldado num `Root` central por
+  `WeldConstraint` (técnica do Dead Rails), com rodas em `HingeConstraint` — **tração** por Motor
+  nos hinges traseiros e **esterço** por servo nas mangas dianteiras. O motorista sentado recebe
+  network ownership da caravana; passageiros ficam welded ao mesmo assembly (é o que elimina o
+  jitter de quem não dirige). *Desvio documentado do doc 4.5:* o empuxo por `PrismaticConstraint`
+  do Dead Rails pressupõe trilho reto ancorado; com pilotagem livre um prismatic interno não gera
+  força líquida, então a tração vai nos hinges das rodas (padrão nativo de veículo do Roblox).
+- **Mundo contínuo via StreamingEnabled** (doc 4.5/4.6): a run inteira é um único espaço; todos os
+  POIs e corredores coexistem e o streaming carrega/descarrega por distância. Não há fade nem
+  teleporte entre POIs — o grupo **dirige** de um ao outro. A única transição de tela que resta é a
+  fronteira lobby↔run (placeholder do TeleportService de 2 places, doc 4.2).
+- **Fork por escolha física + "sem volta"** (doc 4.5/4.6): no braço de cada ramo do fork há um
+  volume de commit; ao a caravana cruzá-lo, o servidor **destrói a geometria do ramo não escolhido**
+  (chão vira Air). Sem chão pra voltar, o "sem volta" se cumpre pela geometria.
+- **Noite por chegada + dia de preparação** (doc 4.5/5.4): um volume de chegada no acampamento do
+  POI detecta a caravana; a chegada abre uma **janela de preparação** (coleta/construção). A noite
+  cai por timer (60s [placeholder]) **ou** por um gatilho do grupo (prompt "Convocar a noite" na
+  caravana), nunca instantaneamente. Uma cutscene de anoitecer (sol se põe, lua sobe) dispara ao fim
+  da janela e a caravana trava no lugar até o amanhecer.
+- **Sem votação — permanência/avanço por posição** (doc 5.4): a UI de voto e o tally/host foram
+  removidos. Ao amanhecer a caravana destrava e o grupo é livre. Quando a próxima noite cai, a
+  **posição física** decide: dentro dos limites do POI = permanência (wave +1 de dificuldade por
+  noite extra, recompensa travada no valor-base); já chegou no próximo POI = avanço (contador de
+  permanência reseta).
+
+### Meta-loop (passo 9), inalterado nesta reconstrução
+
+- **Lobby "Posto de Partida"**, **persistência** (`ProfileManager`, doc 4.4) e **catálogo com 1
+  unlock lateral** (Barricada Reforçada) seguem como antes. A moeda vira perfil só no fim da run
+  (vitória = total; derrota = checkpoint).
 
 Passo 8 (boss, checkpoint, vitória/derrota, moeda):
 
@@ -80,53 +97,78 @@ cap de inimigos, taxas e ritmo (passo 10). Depois, Seção 3.2 (expansão: Carpi
 
 ## Estrutura
 
-- `src/ServerScriptService/OneWayCaravanNightfallServer.server.lua` — autoridade total (HP, recursos, spawn, dano, morte, rota, votação, travessia, anti-exploit).
-- `src/ServerScriptService/ZoneBuilder.lua` — ModuleScript: constrói zonas em runtime (terreno + props + recursos + spawns), a caravana e o movimento dela.
-- `src/ServerScriptService/RouteGraph.lua` — ModuleScript: grafo DAG da run (3 nós + boss, fork segura/arriscada).
+- `src/ServerScriptService/OneWayCaravanNightfallServer.server.lua` — autoridade total (HP, recursos, spawn, dano, morte, rota, trava/soltura da caravana, chegada/permanência por posição, anti-exploit).
+- `src/ServerScriptService/ZoneBuilder.lua` — ModuleScript: constrói o **mundo contínuo** da run em runtime (POIs + corredores + plazas, tudo no mesmo espaço), o rig físico da caravana (VehicleSeat + HingeConstraints) e os grupos destrutíveis (base do "sem volta" do fork).
+- `src/ServerScriptService/RouteGraph.lua` — ModuleScript: grafo DAG da run (3 nós + boss, fork segura/arriscada). Decide os TIPOS de POI; as posições são slots fixos no ZoneBuilder.
 - `src/ServerScriptService/ProfileManager.lua` — ModuleScript: persistência de perfil (doc 4.4) com session-locking; interface pronta pra trocar por ProfileStore.
-- `src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua` — HUD, votação, fade de zona, preview de colocação; só envia intenção.
+- `src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua` — HUD, fade da fronteira lobby↔run, preview de colocação; só envia intenção. A condução é física (input padrão do VehicleSeat), sem remote de direção.
 - `src/StarterPack/Machado/WeaponClient.client.lua` — LocalScript da Tool Machado.
-- `tools/setup_place.lua` — setup 1x na Command Bar: limpa builds antigos e cria a Tool Machado. O mapa é construído em runtime pelo servidor.
-- `default.project.json` — projeto Rojo.
+- `tools/setup_place.lua` — setup 1x na Command Bar: liga StreamingEnabled, limpa builds antigos e cria a Tool Machado. O mundo é construído em runtime pelo servidor.
+- `default.project.json` — projeto Rojo (declara StreamingEnabled no Workspace).
 
 ## Setup num place novo
 
 1. `rojo serve` + plugin Rojo para sincronizar os scripts.
-2. Rode `tools/setup_place.lua` na Command Bar do Studio (modo Edit) — limpa o place e cria o Machado.
+2. Rode `tools/setup_place.lua` na Command Bar do Studio (modo Edit) — liga o streaming, limpa o place e cria o Machado.
 3. Cole `WeaponClient.client.lua` como LocalScript dentro de `StarterPack.Machado`.
-4. Play. O servidor constrói a primeira zona (estação) e a caravana sozinho.
+4. Play. O servidor liga StreamingEnabled, constrói o mundo contínuo e a caravana sozinho.
 
-Preview de zona no modo Edit (opcional, com Rojo conectado):
+Preview de um POI isolado no modo Edit (opcional, com Rojo conectado):
 `require(game.ServerScriptService.ZoneBuilder).preview("mina")` na Command Bar.
 
 ## Fluxo do jogo (MVP)
 
 1. **Lobby (Posto de Partida)**: catálogo lateral no painel à direita (moeda do perfil); qualquer
    um segura o poste "Iniciar expedição" pra partir.
-2. Dia 1 na Estação (90s) → Noite 1 (3 ondas) → votação. Noite sobrevivida = +10 de moeda de run.
-3. Ficar = mais um dia/noite no mesmo POI com +1 inimigo/onda por noite extra (moeda não sobe).
-4. Avançar = manhã de 40s → caravana parte → travessia → chegada no próximo POI → **dia de
-   preparação** → noite.
-5. No fork, a votação oferece Planície (segura) ou Mina (arriscada, +1 de dificuldade à noite).
-6. Estação → fork → Acampamento Dizimado → Covil: dia de preparação e o boss sai do covil pelo funil.
-7. Boss morto = +20, checkpoint e vitória. Grupo inteiro caído = derrota (credita só o checkpoint).
+2. Chegada na Estação → **janela de preparação** (coleta/construção; convoquem a noite na caravana
+   quando prontos) → **anoitecer** (cutscene) → Noite 1 (3 ondas). Noite sobrevivida = +10 de moeda.
+3. Ao amanhecer a caravana **destrava**. Ficar parado no POI até a próxima noite = permanência
+   (+1 inimigo/onda por noite extra, recompensa igual). Dirigir pro próximo POI = avanço.
+4. No fork, dirigir até o ramo escolhido cruza o **trigger de commit** e o outro ramo desmorona
+   (chão destruído): Planície (segura) vs Mina (arriscada, +1 de dificuldade à noite).
+5. Estação → fork → Acampamento Dizimado → Covil: cada chegada abre preparação; no covil o boss sai
+   pelo funil.
+6. Boss morto = +20, checkpoint e vitória. Grupo inteiro caído = derrota (credita só o checkpoint).
    No fim, a moeda garantida vira moeda de perfil de cada jogador e o grupo volta ao lobby.
 
-## Layout de POI (referência rápida)
+## Layout do mundo e de POI (referência rápida)
 
-- Acampamento/spawn: clareira em torno de `(0, -47)`; a caravana para ali e ela É o acampamento.
-- Funil: crista de canyon em `z = 30`, passagem única de 10 studs em `x = 0` (marcador verde = slot da barricada).
-- Spawns de inimigos: pads vermelhos ao norte (`z ≈ 118–136`), lidos em `workspace.EnemySpawns`.
-- Recursos: madeira ao sul (5 usos), madeira seca ao norte (8 usos, lado da horda), arbustos (4 usos), caixas de suprimento (2 usos, comida).
+- **Mundo contínuo**: POIs em slots fixos ligados por corredores/plazas, todos no mesmo espaço.
+  n1 na origem → plaza de fork (`z≈460`) → n2a (oeste) / n2b (leste) → plaza de merge (`z≈1500`)
+  → n3 (`z≈1840`) → covil (`z≈2460`). Streaming carrega/descarrega por distância.
+- **Coordenadas de POI são locais ao centro do POI**: acampamento em `centro + (0,-47)` (a caravana
+  para ali quando o grupo a leva até lá); funil de canyon em `centro + z=30`, passagem de 10 studs;
+  spawns de inimigos ao norte (`centro + z≈118–136`, em `workspace.EnemySpawns/<id>`).
+- **Recursos por zona** em `workspace.ResourceNodes/<id>/Trees|FoodBushes`: madeira ao sul (5 usos),
+  madeira seca ao norte (8 usos, lado da horda), arbustos (4 usos), caixas de suprimento (2, comida).
+- **Guardrails invisíveis** (grupo de colisão `GuardrailCaravana`) flanqueiam os corredores: seguram
+  só a caravana; jogadores e inimigos atravessam pra coletar nas laterais. Provisório de playtest —
+  o terreno de arte final (canyon/desfiladeiro) substitui isso depois.
 
-## Bugs conhecidos / dívidas
+## Problemas conhecidos / dívidas
 
-- Persistência no Studio exige "Enable Studio Access to API Services" (Game Settings → Security)
-  e place publicado; sem isso o ProfileManager roda em modo memória (avisa no Output).
-- Split físico em 2 places (lobby + run, TeleportService com reserved server, doc 4.2) pendente de
-  publish; o lobby hoje é uma zona no mesmo place. ProfileManager caseiro — trocar a implementação
-  interna pelo ProfileStore oficial (loleris) quando importar o módulo (interface já compatível).
-- Estruturas ainda podem sobrepor inimigos (jogadores já são bloqueados); caravana atravessa estruturas construídas fora da estrada durante a partida.
-- Colocação usa mouse; em touch funciona por tap, mas sem UX dedicada de mobile (passo 10).
-- Inimigo é MoveTo direto (sem PathfindingService); pode travar em quina fora do funil — aceito pelo doc 4.8.
-- Troca de zona usa fade + teleporte (loading “duro”); doc 4.5 marca isso como detalhe de build, revisar no passo 10.
+- **Persistência no Studio** exige "Enable Studio Access to API Services" (Game Settings → Security)
+  e place publicado; sem isso o `ProfileManager` roda em modo memória (avisa no Output).
+- **Split físico em 2 places** (lobby + run, TeleportService com reserved server, doc 4.2) pendente
+  de publish; o lobby hoje é uma zona no mesmo place, e a fronteira lobby↔run é a única transição de
+  tela (fade) que resta. `ProfileManager` caseiro — trocar por ProfileStore (loleris) depois
+  (interface já compatível).
+- **Latência de throttle da caravana**: a condução é responsiva pro esterço, mas os motores de
+  tração são acionados no servidor a partir do `ThrottleFloat` replicado do motorista, então há ~1
+  RTT de atraso na aceleração. Aceitável pra co-op PvE; revisar no playtest (passo 10) — mover o
+  acionamento dos motores pro cliente-dono se ficar ruim.
+- **Jitter de passageiro**: mitigado pela técnica do assembly soldado + Seats nativos (doc 4.5), mas
+  o doc (risco 12) pede validação num playtest real com 2+ jogadores simultâneos — não dá pra
+  confirmar sem isso.
+- **Caravana parada onde chega**: o volume de chegada trava a caravana perto do acampamento quando o
+  grupo a leva até lá; o terreno de POI é placeholder 480×480 (fora de escopo), então a posição
+  exata da caravana vs. as decorações de camp pode não casar até o level design manual.
+- **Guardrail é geometria provisória** (paredes de colisão invisíveis), não o canyon/desfiladeiro de
+  arte final (doc 4.5, risco 13). Distância do guardrail (`GUARD_OFF=16` do eixo) e a velocidade da
+  caravana (`CARAVAN_MAX_SPEED=24`) são placeholders de playtest.
+- **Grupo parado no meio da estrada** (fora dos limites do POI, sem ter chegado no próximo) não
+  dispara a noite — ela espera a chegada. A estrada é de mão única e curta, mas é um AFK-lock em
+  teoria (alinhado ao risco 10 do doc; revisar antes de matchmaking público).
+- **Colocação usa mouse**; em touch funciona por tap, mas sem UX dedicada de mobile (passo 10).
+- **Inimigo é MoveTo direto** (sem PathfindingService); pode travar em quina fora do funil — aceito
+  pelo doc 4.8.

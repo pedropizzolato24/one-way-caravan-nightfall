@@ -1109,8 +1109,10 @@ local function preparationPhase()
 	end
 end
 
--- desmonta as estruturas plantadas na estrada do POI atual pra caravana poder passar
-local function clearRoadStructures()
+-- desmonta as estruturas plantadas na faixa da estrada (o funil) pra caravana poder sair.
+-- Só é chamado quando a caravana de fato AVANÇA pelo funil — durante a permanência a barricada
+-- fica de pé (defesa repetida no mesmo POI).
+local function clearExitLaneStructures()
 	local cx = (CurrentZone and CurrentZone.center and CurrentZone.center.X) or 0
 	for _, s in ipairs(structuresFolder:GetChildren()) do
 		local pp = s.PrimaryPart
@@ -1132,14 +1134,21 @@ local function freeDayWindow(currentId)
 	applyDayAmbience()
 	transitionClock(0, 12, 5) -- amanhecer
 	respawnResources()
-	clearRoadStructures()
 	ZoneBuilder.setCaravanaLocked(false) -- livre pra dirigir (ou ficar parado no POI)
 	announce("Amanheceu. Fiquem por outra noite ou dirijam pro próximo ponto — a estrada decide.")
 
 	local dayStart = os.clock()
+	local clearedExit = false -- limpa o funil só quando a caravana avança por ele
 	while not runState.defeated do
 		tryForkCommit()
 		local p = campPos()
+		-- avançando pelo funil: some com a própria barricada da faixa antes que ela prenda a caravana
+		-- (durante a permanência a caravana fica no camp, ao sul do funil, e a barricada é preservada)
+		local ridgeZ = CurrentZone and CurrentZone.ridgeZ
+		if not clearedExit and ridgeZ and p.Z >= ridgeZ - 15 then
+			clearExitLaneStructures()
+			clearedExit = true
+		end
 		-- chegou em POI novo? -> avançar (contador de permanência reseta no próximo POI)
 		for id, zone in pairs(RunWorld.zones) do
 			if id ~= currentId and not ZoneBuilder.isGroupDestroyed(id) and rectContains(zone.arrivalRect, p) then

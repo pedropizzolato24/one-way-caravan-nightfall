@@ -566,9 +566,10 @@ function ZoneBuilder.buildWorld(graph)
 		-- ida: plaza do fork -> POI do ramo (braço em L, eixos alinhados)
 		corridorX(grp, FORK_PLAZA.Z, branch.sign * (PLAZA_HALF - 8), bx + branch.sign * BERM_OFF)
 		corridorZ(grp, bx, FORK_PLAZA.Z - BERM_OFF, bz - HALF + 14)
-		-- volta: POI do ramo -> plaza do merge
+		-- volta: POI do ramo -> plaza do merge. O corridorX estende PASSADO bx (bx + sign*BERM_OFF)
+		-- pra sobrepor o corridorZ da volta no canto — senão sobra um vão no chão na curva.
 		corridorZ(grp, bx, bz + HALF - 14, MERGE_PLAZA.Z + BERM_OFF)
-		corridorX(grp, MERGE_PLAZA.Z, bx - branch.sign * BERM_OFF, branch.sign * (PLAZA_HALF - 8))
+		corridorX(grp, MERGE_PLAZA.Z, bx + branch.sign * BERM_OFF, branch.sign * (PLAZA_HALF - 8))
 	end
 
 	-- plaza do merge (aberturas: oeste/leste=ramos, norte=n3) + stub até o portão de n3

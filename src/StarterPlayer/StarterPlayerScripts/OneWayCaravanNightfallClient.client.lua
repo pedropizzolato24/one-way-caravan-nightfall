@@ -1,4 +1,6 @@
--- One Way Caravan: Nightfall — MVP cliente: input + UI + preview de colocação + votação. Nenhuma autoridade aqui (doc 4.1).
+-- One Way Caravan: Nightfall — MVP cliente: input + HUD + preview de colocação. Nenhuma autoridade aqui (doc 4.1).
+-- Sem votação (passo 6): stay/avançar é implícito pela posição da caravana; a condução é 100%
+-- física (o VehicleSeat do servidor lê o input padrão do Roblox, sem remote de direção aqui).
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
