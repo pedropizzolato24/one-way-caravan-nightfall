@@ -1281,6 +1281,10 @@ task.spawn(function()
 		resetPlayersForNewRun()
 		task.wait(1)
 		teleportPlayersBehindCaravana()
+		-- destrava a caravana no posto: espaço seguro e fechado por muros, dá pra treinar a
+		-- pilotagem (VehicleSeat) antes da run de verdade sem risco. unseatAll+lock reancoram
+		-- ela ao voltar pro lobby (linha acima) e ao entrar na run (setup abaixo).
+		ZoneBuilder.setCaravanaLocked(false)
 		announce("Lobby: gastem a moeda no catálogo (painel à direita) e segurem o poste de partida quando estiverem prontos.")
 
 		local prompt = Instance.new("ProximityPrompt")

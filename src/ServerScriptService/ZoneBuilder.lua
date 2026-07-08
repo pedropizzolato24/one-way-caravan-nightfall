@@ -448,7 +448,7 @@ local function buildPOI(kind, id, center, gates)
 		-- caravana até o camp (não já no portão), então ela para perto do funil, não no sul distante.
 		-- Checado por poll no servidor (.Touched não é confiável com StreamingEnabled + física no cliente)
 		arrivalRect = { minX = ox - 40, maxX = ox + 40, minZ = oz + CAMP_Z - 24, maxZ = oz + CAMP_Z + 30 },
-		campCf = CFrame.new(ox, CARAVAN_Y, oz + CAMP_Z),
+		campCf = CFrame.new(ox, terrainGroundY(ox, oz + CAMP_Z) + CARAVAN_Y, oz + CAMP_Z),
 		campPos = Vector3.new(ox, 0, oz + CAMP_Z),
 		spawnPos = Vector3.new(ox - 16, 0.5, oz - 42),
 		ridgeZ = oz + RIDGE_Z,
@@ -646,18 +646,22 @@ function ZoneBuilder.buildLobby()
 	light.Range = 20
 	light.Parent = flame
 
-	-- poste de partida na frente da caravana (o servidor pluga o ProximityPrompt nele)
-	local post = mkPart("PostePartida", Vector3.new(1, 6, 1), Vector3.new(6, 3, 26), Color3.fromRGB(110, 80, 48), mapa,
+	-- poste de partida na frente da caravana (o servidor pluga o ProximityPrompt nele).
+	-- Y original assumia chão em 0 (a superfície suavizada do Terrain fica um pouco acima);
+	-- offset pelo groundY real do ponto evita o poste/quadro nascerem afundados.
+	local postGY = terrainGroundY(6, 26)
+	local post = mkPart("PostePartida", Vector3.new(1, 6, 1), Vector3.new(6, postGY + 3, 26), Color3.fromRGB(110, 80, 48), mapa,
 		{ Material = Enum.Material.Wood })
-	mkPart("BandeiraPartida", Vector3.new(2.6, 1.4, 0.2), Vector3.new(7.4, 5.2, 26), Color3.fromRGB(190, 70, 55), mapa,
+	mkPart("BandeiraPartida", Vector3.new(2.6, 1.4, 0.2), Vector3.new(7.4, postGY + 5.2, 26), Color3.fromRGB(190, 70, 55), mapa,
 		{ Material = Enum.Material.Fabric, CanCollide = false })
 
 	-- quadro do catálogo perto do spawn (a UI do catálogo abre sozinha no lobby)
-	mkPart("QuadroCatalogo", Vector3.new(5, 3.4, 0.5), Vector3.new(-16, 3, 2), Color3.fromRGB(96, 70, 44), mapa,
+	local quadroGY = terrainGroundY(-16, 2)
+	mkPart("QuadroCatalogo", Vector3.new(5, 3.4, 0.5), Vector3.new(-16, quadroGY + 3, 2), Color3.fromRGB(96, 70, 44), mapa,
 		{ Material = Enum.Material.WoodPlanks })
-	mkPart("QuadroPernaOeste", Vector3.new(0.5, 3, 0.5), Vector3.new(-18, 1.5, 2), Color3.fromRGB(80, 58, 36), mapa,
+	mkPart("QuadroPernaOeste", Vector3.new(0.5, 3, 0.5), Vector3.new(-18, quadroGY + 1.5, 2), Color3.fromRGB(80, 58, 36), mapa,
 		{ Material = Enum.Material.Wood })
-	mkPart("QuadroPernaLeste", Vector3.new(0.5, 3, 0.5), Vector3.new(-14, 1.5, 2), Color3.fromRGB(80, 58, 36), mapa,
+	mkPart("QuadroPernaLeste", Vector3.new(0.5, 3, 0.5), Vector3.new(-14, quadroGY + 1.5, 2), Color3.fromRGB(80, 58, 36), mapa,
 		{ Material = Enum.Material.Wood })
 
 	moveSpawnLocation(Vector3.new(-14, 0.5, -12))
@@ -665,7 +669,7 @@ function ZoneBuilder.buildLobby()
 	return {
 		id = "lobby",
 		kind = "lobby",
-		caravanaCf = CFrame.new(0, CARAVAN_Y, 6),
+		caravanaCf = CFrame.new(0, terrainGroundY(0, 6) + CARAVAN_Y, 6),
 		startPost = post,
 		ridgeZ = nil,
 	}
@@ -871,10 +875,14 @@ function ZoneBuilder.buildCaravana()
 	vseat.Anchored = false
 	vseat.CanCollide = true
 	vseat.CollisionGroup = "Caravana"
-	vseat.MaxSpeed = 0 -- motores legados desligados; quem dirige são os hinges via script
+	-- MaxSpeed/Torque/TurnSpeed=0 desligam só o auto-drive LEGADO do VehicleSeat (força aplicada
+	-- pelo próprio engine); Throttle/Steer/ThrottleFloat/SteerFloat continuam populados pelo input
+	-- do jogador independente disso — é o padrão documentado pra veículo custom por constraints.
+	-- HeadsUpDisplay fica ligado (nativo) pra dar feedback de velocidade ao motorista.
+	vseat.MaxSpeed = 0
 	vseat.Torque = 0
 	vseat.TurnSpeed = 0
-	vseat.HeadsUpDisplay = false
+	vseat.HeadsUpDisplay = true
 	local vw = Instance.new("WeldConstraint")
 	vw.Part0 = root
 	vw.Part1 = vseat
