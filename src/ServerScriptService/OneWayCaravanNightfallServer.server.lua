@@ -1072,6 +1072,9 @@ local function preparationPhase()
 	applyDayAmbience()
 	Lighting.ClockTime = 12 -- a viagem já consumiu a manhã; a chegada segue do meio-dia
 	respawnResources()
+	-- doc 4.5: a caravana só trava "no lugar até o amanhecer" a partir do anoitecer (ver
+	-- nightfallCutscene); durante a preparação ela fica livre pra dirigir/reposicionar.
+	ZoneBuilder.setCaravanaLocked(false)
 	print("[One Way Caravan: Nightfall] === PREPARAÇÃO (janela antes da noite) ===")
 	announce("Dia de preparação: coletem e construam. Convoquem a noite na caravana quando prontos.")
 
@@ -1352,7 +1355,10 @@ task.spawn(function()
 					currentId = arrivedId
 					node = graph.nodes[currentId]
 					CurrentZone = RunWorld.zones[currentId]
-					ZoneBuilder.setCaravanaLocked(true)
+					-- sem lock aqui: a caravana já está destravada (o grupo acabou de dirigi-la
+					-- até aqui) e travar de repente seria um freeze brusco no meio do movimento;
+					-- preparationPhase() (chamada no topo do loop externo) já garante o estado
+					-- destravado durante a janela, e nightfallCutscene trava só no anoitecer.
 					ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
 					RS:SetAttribute("NodeName", node.label)
 					announce("Chegando: " .. node.label .. ". A chegada abre o dia de preparação.")
