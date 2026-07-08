@@ -19,7 +19,8 @@ local RouteGraph = require(script.Parent.RouteGraph)
 local ProfileManager = require(script.Parent.ProfileManager)
 
 -- ===== config =====
-local DAY_LENGTH = 90 -- dia completo (só quando o grupo vota ficar, ou no 1º nó)
+local DAY_LENGTH = 90 -- dia (usado nas noites de permanência; a 1ª noite num POI usa PREP_LENGTH)
+local PREP_LENGTH = 60 -- janela de preparação ao chegar num POI novo, antes da noite [placeholder]
 local NIGHT_LENGTH = 120
 local VOTE_LENGTH = 20
 local CARAVAN_SANITY_SPEED = 60 -- teto de velocidade horizontal da caravana (anti-exploit do motorista)
@@ -1022,6 +1023,12 @@ local function applyDayAmbience()
 	atmosphere.Density = 0.3
 end
 
+local function applyDuskAmbience()
+	Lighting.OutdoorAmbient = Color3.fromRGB(150, 96, 74)
+	Lighting.Brightness = 1.4
+	atmosphere.Density = 0.5
+end
+
 local function applyNightAmbience()
 	Lighting.OutdoorAmbient = Color3.fromRGB(90, 95, 128)
 	Lighting.Brightness = 1
@@ -1059,13 +1066,25 @@ end
 
 local nightCount = 0
 
+-- cutscene de anoitecer (doc 4.5/5.4): o sol se põe, a lua sobe e a caravana trava no lugar até
+-- o amanhecer. Dispara ao fim da janela de preparação, nunca instantaneamente na chegada.
+local function nightfallCutscene()
+	RS:SetAttribute("Phase", "Anoitecer")
+	RS:SetAttribute("PhaseTimeLeft", 0)
+	ZoneBuilder.setCaravanaLocked(true) -- vira acampamento fixo até o amanhecer
+	announce("O sol se põe e a lua sobe. A caravana para — segurem a linha até o amanhecer.")
+	applyDuskAmbience()
+	transitionClock(12, 18, 3) -- tarde -> pôr do sol
+	applyNightAmbience()
+	transitionClock(18, 24, 4) -- crepúsculo -> lua no alto
+end
+
 local function nightPhase(waveBonus)
 	nightCount += 1
 	RS:SetAttribute("Cycle", nightCount)
 	RS:SetAttribute("Phase", "Noite")
 	ZoneBuilder.setCaravanaLocked(true) -- a caravana vira acampamento fixo até o amanhecer (doc 5.4)
 	applyNightAmbience()
-	transitionClock(12, 24, 5)
 	print("[One Way Caravan: Nightfall] === NOITE " .. nightCount .. " (bônus de onda: " .. waveBonus .. ") ===")
 	local waveIdx = 1
 	local t0 = os.clock()
@@ -1090,6 +1109,51 @@ local function nightPhase(waveBonus)
 	end
 end
 
+-- janela de preparação ao CHEGAR num POI novo (doc 4.5/5.4): abre a coleta/construção antes da
+-- primeira noite ali; a noite cai por timer OU por um gatilho do grupo (prompt na caravana),
+-- nunca instantaneamente na chegada. Retorna sem cair a noite se a run acabou.
+local function preparationPhase()
+	RS:SetAttribute("Phase", "Preparação")
+	applyDayAmbience()
+	Lighting.ClockTime = 12 -- a viagem já consumiu a manhã; a chegada segue do meio-dia
+	respawnResources()
+	print("[One Way Caravan: Nightfall] === PREPARAÇÃO (janela antes da noite) ===")
+	announce("Dia de preparação: coletem e construam. Convoquem a noite na caravana quando prontos.")
+
+	-- gatilho do grupo: prompt na caravana pra convocar a noite antes do fim do timer
+	local summoned = false
+	local prompt
+	local caravana = workspace:FindFirstChild("Caravana")
+	if caravana and caravana.PrimaryPart then
+		prompt = Instance.new("ProximityPrompt")
+		prompt.Name = "ConvocarNoite"
+		prompt.ActionText = "Convocar a noite"
+		prompt.ObjectText = "Caravana"
+		prompt.HoldDuration = 1.5
+		prompt.RequiresLineOfSight = false
+		prompt.MaxActivationDistance = 16
+		prompt.Parent = caravana.PrimaryPart
+		prompt.Triggered:Connect(function()
+			summoned = true
+		end)
+	end
+
+	for t = PREP_LENGTH, 1, -1 do
+		if runState.defeated or summoned then
+			break
+		end
+		RS:SetAttribute("PhaseTimeLeft", t)
+		task.wait(1)
+	end
+	if prompt then
+		prompt:Destroy()
+	end
+	if summoned and not runState.defeated then
+		announce("O grupo convocou a noite.")
+	end
+end
+
+-- dia comum (noites de permanência): amanhece de verdade e roda o timer cheio; sem convocação
 local function fullDay(skipDawn)
 	RS:SetAttribute("Phase", "Dia")
 	applyDayAmbience()
@@ -1326,9 +1390,16 @@ task.spawn(function()
 
 		local victory = false
 		local stays = 0 -- noites extras consecutivas neste POI (doc 5.4: reseta ao avançar)
-		local dawnTransition = false -- 1º dia e dias de chegada começam ao meio-dia; pós-noite tem amanhecer
+		local atNewPOI = true -- chegar num POI novo abre a janela de preparação; ficar = dia comum
 		while true do
-			fullDay(not dawnTransition)
+			-- 1ª noite num POI: janela de preparação (gatilho do grupo). Permanência: dia comum.
+			if atNewPOI then
+				preparationPhase()
+			else
+				fullDay(false)
+			end
+			if runState.defeated then break end
+			nightfallCutscene() -- sol se põe, lua sobe, caravana trava (nunca instantâneo na chegada)
 			if runState.defeated then break end
 			nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
 			if runState.defeated then break end
@@ -1336,7 +1407,7 @@ task.spawn(function()
 			if runState.defeated then break end
 			if decision == "stay" then
 				stays += 1
-				dawnTransition = true
+				atNewPOI = false
 				announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
 			else
 				stays = 0
@@ -1349,15 +1420,15 @@ task.spawn(function()
 				ZoneBuilder.setCaravanaLocked(true)
 				ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
 				RS:SetAttribute("NodeName", node.label)
-				-- revisão de gameplay: a chegada abre um dia de preparação antes da noite
-				announce("Chegando: " .. node.label .. ". O dia é de preparação antes da noite.")
+				announce("Chegando: " .. node.label .. ". A chegada abre o dia de preparação.")
 				if node.kind == "boss" then
-					fullDay(true) -- dia de preparação também no Covil, antes do boss
+					-- covil também tem janela de preparação antes do confronto (doc 4.5/5.4)
+					preparationPhase()
 					if runState.defeated then break end
 					victory = bossPhase()
 					break
 				end
-				dawnTransition = false -- a viagem já consumiu a manhã; o dia de chegada segue do meio-dia
+				atNewPOI = true -- próximo POI: nova janela de preparação
 			end
 		end
 

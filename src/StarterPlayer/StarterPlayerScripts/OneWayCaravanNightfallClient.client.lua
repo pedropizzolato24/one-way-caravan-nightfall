@@ -143,11 +143,10 @@ refreshRes()
 
 local PHASE_COLORS = {
 	Noite = Color3.fromRGB(45, 25, 70),
+	["Preparação"] = Color3.fromRGB(70, 80, 30),
+	Anoitecer = Color3.fromRGB(120, 60, 30),
 	["Votação"] = Color3.fromRGB(25, 45, 80),
-	["Manhã"] = Color3.fromRGB(90, 65, 25),
-	Partida = Color3.fromRGB(90, 65, 25),
 	Travessia = Color3.fromRGB(90, 65, 25),
-	Chegada = Color3.fromRGB(90, 65, 25),
 	Boss = Color3.fromRGB(90, 20, 20),
 	["Vitória"] = Color3.fromRGB(25, 70, 40),
 	Derrota = Color3.fromRGB(60, 25, 25),
@@ -160,6 +159,10 @@ local function refreshPhase()
 	local t = RS:GetAttribute("PhaseTimeLeft") or 0
 	if phase == "Dia" then
 		phaseLbl.Text = string.format("Dia %d — %ds", cycle + 1, t)
+	elseif phase == "Preparação" then
+		phaseLbl.Text = string.format("Preparação — %ds", t)
+	elseif phase == "Anoitecer" then
+		phaseLbl.Text = "Anoitecer..."
 	elseif phase == "Noite" then
 		phaseLbl.Text = string.format("Noite %d — %ds", cycle, t)
 	elseif phase == "Boss" then
