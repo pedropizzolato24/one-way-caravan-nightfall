@@ -54,6 +54,39 @@ local function replaceGround(minV, maxV, from, to)
 	terrain:ReplaceMaterial(Region3.new(minV, maxV):ExpandToGrid(4), 4, from, to)
 end
 
+-- grupos de colisão: chassi e rodas da caravana não colidem entre si (o eixo visual passa dentro
+-- da roda); ambos colidem com o mundo. "GuardrailCaravana" segura SÓ a caravana: jogadores e
+-- inimigos (grupo Default) atravessam as paredes invisíveis e seguem coletando fora da estrada.
+local function ensureCollisionGroups()
+	for _, g in ipairs({ "Caravana", "CaravanaRodas", "GuardrailCaravana" }) do
+		pcall(function()
+			PhysicsService:RegisterCollisionGroup(g)
+		end)
+	end
+	PhysicsService:CollisionGroupSetCollidable("Caravana", "CaravanaRodas", false)
+	PhysicsService:CollisionGroupSetCollidable("GuardrailCaravana", "Default", false)
+	PhysicsService:CollisionGroupSetCollidable("GuardrailCaravana", "GuardrailCaravana", false)
+	PhysicsService:CollisionGroupSetCollidable("GuardrailCaravana", "Caravana", true)
+	PhysicsService:CollisionGroupSetCollidable("GuardrailCaravana", "CaravanaRodas", true)
+end
+
+-- parede de guardrail: invisível, alta e enterrada 2 studs (a caravana não cunha por baixo nem
+-- vaulta por cima). Engenharia provisória de playtest — o terreno de arte final (canyon,
+-- desfiladeiro) substitui isso depois (doc 4.5 "guardrail de terreno" / risco 13).
+local function mkGuardrail(parent, name, pos, size)
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Size = size
+	p.Position = pos
+	p.Anchored = true
+	p.Transparency = 1
+	p.CanCollide = true
+	p.CanQuery = false -- não bloqueia mouse/raycast de colocação
+	p.CollisionGroup = "GuardrailCaravana"
+	p.Parent = parent
+	return p
+end
+
 -- altura real da superfície do terreno em (x,z). A superfície suavizada do Terrain fica um pouco
 -- acima de y=0, então props posicionados assumindo chão em 0 afundavam; assentar por raycast resolve.
 local function terrainGroundY(x, z)
@@ -346,6 +379,11 @@ function ZoneBuilder.buildTransition()
 	mapa.Name = "Mapa"
 	mapa.Parent = workspace
 
+	-- guardrail provisório (passo 2): a caravana fica presa na faixa da estrada; jogadores
+	-- atravessam as paredes (grupo de colisão) pra coletar a vegetação das laterais
+	mkGuardrail(mapa, "GuardrailOeste", Vector3.new(-16, 9, 0), Vector3.new(2, 22, HALF * 2))
+	mkGuardrail(mapa, "GuardrailLeste", Vector3.new(16, 9, 0), Vector3.new(2, 22, HALF * 2))
+
 	-- vegetação e pedras esparsas ao longo do corredor (dá o que coletar na travessia)
 	for i = 1, 10 do
 		local side = rng:NextInteger(0, 1) == 0 and -1 or 1
@@ -446,17 +484,6 @@ local REAR_WHEEL_RADIUS = 2.4
 local STEER_ANGLE = 28 -- graus de esterço máximo [placeholder de playtest]
 local DRIVE_TORQUE = 400000 -- por roda motriz [placeholder de playtest]
 local STEER_TORQUE = 1e7
-
--- grupos de colisão: chassi e rodas não colidem entre si (o eixo visual passa dentro da roda);
--- ambos colidem com o mundo. "GuardrailCaravana" (passo 2) segura só a caravana, não jogadores.
-local function ensureCollisionGroups()
-	for _, g in ipairs({ "Caravana", "CaravanaRodas" }) do
-		pcall(function()
-			PhysicsService:RegisterCollisionGroup(g)
-		end)
-	end
-	PhysicsService:CollisionGroupSetCollidable("Caravana", "CaravanaRodas", false)
-end
 
 -- referências vivas do rig (preenchidas por buildCaravana)
 local rig = { locked = true, seat = nil, root = nil, motors = {}, servos = {}, seats = {} }
