@@ -1,4 +1,6 @@
--- One Way Caravan: Nightfall — MVP cliente: input + UI + preview de colocação + votação. Nenhuma autoridade aqui (doc 4.1).
+-- One Way Caravan: Nightfall — MVP cliente: input + HUD + preview de colocação. Nenhuma autoridade aqui (doc 4.1).
+-- Sem votação (passo 6): stay/avançar é implícito pela posição da caravana; a condução é 100%
+-- física (o VehicleSeat do servidor lê o input padrão do Roblox, sem remote de direção aqui).
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -10,10 +12,6 @@ local remotes = RS:WaitForChild("Remotes")
 local collectRE = remotes:WaitForChild("CollectResource")
 local placeRE = remotes:WaitForChild("PlaceStructure")
 local eatRE = remotes:WaitForChild("EatFood")
-local voteStartedRE = remotes:WaitForChild("VoteStarted")
-local voteCastRE = remotes:WaitForChild("VoteCast")
-local voteUpdateRE = remotes:WaitForChild("VoteUpdate")
-local voteEndedRE = remotes:WaitForChild("VoteEnded")
 local zoneFadeRE = remotes:WaitForChild("ZoneFade")
 local announceRE = remotes:WaitForChild("Announce")
 local runEndedRE = remotes:WaitForChild("RunEnded")
@@ -143,11 +141,9 @@ refreshRes()
 
 local PHASE_COLORS = {
 	Noite = Color3.fromRGB(45, 25, 70),
-	["Votação"] = Color3.fromRGB(25, 45, 80),
-	["Manhã"] = Color3.fromRGB(90, 65, 25),
-	Partida = Color3.fromRGB(90, 65, 25),
-	Travessia = Color3.fromRGB(90, 65, 25),
-	Chegada = Color3.fromRGB(90, 65, 25),
+	["Preparação"] = Color3.fromRGB(70, 80, 30),
+	Anoitecer = Color3.fromRGB(120, 60, 30),
+	Dia = Color3.fromRGB(60, 80, 40),
 	Boss = Color3.fromRGB(90, 20, 20),
 	["Vitória"] = Color3.fromRGB(25, 70, 40),
 	Derrota = Color3.fromRGB(60, 25, 25),
@@ -160,6 +156,10 @@ local function refreshPhase()
 	local t = RS:GetAttribute("PhaseTimeLeft") or 0
 	if phase == "Dia" then
 		phaseLbl.Text = string.format("Dia %d — %ds", cycle + 1, t)
+	elseif phase == "Preparação" then
+		phaseLbl.Text = string.format("Preparação — %ds", t)
+	elseif phase == "Anoitecer" then
+		phaseLbl.Text = "Anoitecer..."
 	elseif phase == "Noite" then
 		phaseLbl.Text = string.format("Noite %d — %ds", cycle, t)
 	elseif phase == "Boss" then
@@ -215,75 +215,10 @@ RS:GetAttributeChangedSignal("BossHP"):Connect(refreshBoss)
 RS:GetAttributeChangedSignal("BossMaxHP"):Connect(refreshBoss)
 refreshBoss()
 
--- ===== votação de avanço/permanência =====
-local voteFrame = Instance.new("Frame")
-voteFrame.Name = "Vote"
-voteFrame.AnchorPoint = Vector2.new(0.5, 0)
-voteFrame.Position = UDim2.new(0.5, 0, 0, 104)
-voteFrame.Size = UDim2.new(0, 380, 0, 60)
-voteFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-voteFrame.BackgroundTransparency = 0.15
-voteFrame.Visible = false
-voteFrame.Parent = gui
-round(voteFrame)
+-- Passo 6: a votação de avanço/permanência foi removida. A decisão é implícita pela posição
+-- física da caravana quando a noite volta (doc 5.4 rev.3) — não há mais UI de voto no cliente.
 
-local voteTitle = Instance.new("TextLabel")
-voteTitle.Position = UDim2.new(0, 8, 0, 6)
-voteTitle.Size = UDim2.new(1, -16, 0, 24)
-voteTitle.BackgroundTransparency = 1
-voteTitle.TextColor3 = Color3.new(1, 1, 1)
-voteTitle.TextScaled = true
-voteTitle.Font = Enum.Font.SourceSansBold
-voteTitle.Text = "A caravana descansa. Avançar ou ficar?"
-voteTitle.Parent = voteFrame
-
-local voteButtons = {} -- id -> TextButton
-local voteLabels = {} -- id -> texto base
-
-voteStartedRE.OnClientEvent:Connect(function(options)
-	for _, b in pairs(voteButtons) do
-		b:Destroy()
-	end
-	voteButtons, voteLabels = {}, {}
-	for i, o in ipairs(options) do
-		local b = Instance.new("TextButton")
-		b.Position = UDim2.new(0, 8, 0, 34 + (i - 1) * 38)
-		b.Size = UDim2.new(1, -16, 0, 32)
-		b.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
-		b.TextColor3 = Color3.new(1, 1, 1)
-		b.TextScaled = true
-		b.Font = Enum.Font.SourceSansBold
-		b.Text = o.label .. " (0)"
-		b.Parent = voteFrame
-		round(b)
-		voteButtons[o.id] = b
-		voteLabels[o.id] = o.label
-		b.MouseButton1Click:Connect(function()
-			voteCastRE:FireServer(o.id)
-			for id2, b2 in pairs(voteButtons) do
-				b2.BackgroundColor3 = id2 == o.id and Color3.fromRGB(70, 110, 70) or Color3.fromRGB(50, 60, 80)
-			end
-		end)
-	end
-	voteFrame.Size = UDim2.new(0, 380, 0, 42 + #options * 38)
-	voteFrame.Visible = true
-end)
-
-voteUpdateRE.OnClientEvent:Connect(function(counts)
-	for id, b in pairs(voteButtons) do
-		b.Text = string.format("%s (%d)", voteLabels[id] or "", counts[id] or 0)
-	end
-end)
-
-voteEndedRE.OnClientEvent:Connect(function(resultLabel)
-	voteFrame.Visible = false
-	msgLbl.Text = "Decisão do grupo: " .. tostring(resultLabel)
-	task.delay(5, function()
-		if string.find(msgLbl.Text, "Decisão", 1, true) then msgLbl.Text = "" end
-	end)
-end)
-
--- ===== fade de troca de zona =====
+-- ===== fade da fronteira lobby<->run =====
 local fadeGui = Instance.new("ScreenGui")
 fadeGui.Name = "OneWayCaravanNightfallFade"
 fadeGui.ResetOnSpawn = false

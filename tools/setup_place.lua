@@ -9,8 +9,12 @@
 --   require(game.ServerScriptService.ZoneBuilder).preview()          -- estação
 --   require(game.ServerScriptService.ZoneBuilder).preview("mina")    -- ou outro tipo
 
--- limpeza de builds antigos
-for _, n in ipairs({ "ResourceNodes", "Structures", "Enemies", "EnemySpawns", "GreyboxMap", "Mapa", "Caravana", "Baseplate" }) do
+-- mundo contínuo por streaming (doc 4.5/4.6): o servidor também liga isso em runtime, mas deixar
+-- ligado no place evita um primeiro frame sem streaming
+workspace.StreamingEnabled = true
+
+-- limpeza de builds antigos (inclui "Mundo", o novo container contínuo)
+for _, n in ipairs({ "Mundo", "ResourceNodes", "Structures", "Enemies", "EnemySpawns", "GreyboxMap", "Mapa", "Caravana", "Baseplate" }) do
 	local x = workspace:FindFirstChild(n)
 	if x then x:Destroy() end
 end
