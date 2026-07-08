@@ -2,6 +2,14 @@
   "name": "one-way-caravan-nightfall",
   "tree": {
     "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "StreamingEnabled": true,
+        "StreamingMinRadius": 256,
+        "StreamingTargetRadius": 640
+      }
+    },
     "ServerScriptService": {
       "$className": "ServerScriptService",
       "OneWayCaravanNightfallServer": {

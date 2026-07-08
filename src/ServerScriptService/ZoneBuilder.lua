@@ -1,18 +1,31 @@
--- ZoneBuilder — constrói zonas em RUNTIME: terreno, props, recursos, spawns, a caravana e o rig dela.
--- Doc 4.5 (Revisão 3): a caravana é um VEÍCULO pilotado por jogador (VehicleSeat), não mais NPC-driven.
--- Layout comum de POI: estrada sul->norte, acampamento ao sul (a caravana para nele), canyon-funil em
--- z=30 com passagem única de 10 studs, território da ameaça (spawns) ao norte, montanhas fechando tudo.
+-- ZoneBuilder — constrói o MUNDO da run em RUNTIME: terreno, props, recursos, spawns, corredores,
+-- a caravana e o rig físico dela.
+-- Doc 4.5/4.6 (Revisão 3): mundo CONTÍNUO por run via StreamingEnabled — todos os POIs e corredores
+-- coexistem no mesmo espaço, sem zonas isoladas nem teleporte. Cada POI/corredor é um "grupo"
+-- destrutível (instâncias + regiões de terreno), pra o servidor apagar o ramo não escolhido no fork
+-- e o que ficou pra trás (doc 4.5 "ponto de não-retorno").
+-- Layout comum de POI (receita placeholder 480×480, level design manual substitui depois):
+-- estrada sul->norte, acampamento ao sul, canyon-funil em z=+30 local com passagem única de
+-- 10 studs, território da ameaça (spawns) ao norte, montanhas fechando tudo, portões carvados
+-- nas muralhas onde um corredor conecta.
 local Players = game:GetService("Players")
 local PhysicsService = game:GetService("PhysicsService")
 
 local ZoneBuilder = {}
 
 local terrain = workspace.Terrain
-local HALF = 240
-local RIDGE_Z = 30
-local CAMP_Z = -47
+local HALF = 240 -- meia-largura de um POI
+local RIDGE_Z = 30 -- funil do canyon (coordenada local do POI)
+local CAMP_Z = -47 -- acampamento (coordenada local do POI)
 local CARAVAN_Y = 2.5
 local ROCK_COLOR = Color3.fromRGB(104, 101, 96)
+
+-- corredores/plazas (mundo contínuo)
+local CORR_HALF = 20 -- meia-largura do chão do corredor
+local BERM_OFF = 26 -- centro dos taludes de pedra que flanqueiam o corredor
+local GUARD_OFF = 16 -- guardrail invisível: a caravana fica na faixa, jogadores atravessam
+local PLAZA_HALF = 88 -- plazas de fork/merge
+local GATE_W = 40 -- largura da abertura carvada em muralhas/taludes
 
 -- receita por tipo de POI: densidade de recursos + features. Regra dura do doc 5.5:
 -- todo POI serve dia (recurso) e noite (custo) — o custo noturno estático vive no servidor (POI_DIFFICULTY).
@@ -24,6 +37,9 @@ local KIND_CONFIG = {
 	boss = { trees = 0, deadTrees = 8, bushes = 0, rocks = 18, lake = false, crates = 0 },
 }
 
+-- estado do mundo da run atual (nil no lobby): zones[id] + groups[nome] destrutíveis
+local world = nil
+
 -- ===== helpers =====
 local function ensureFolder(parent, name)
 	local f = parent:FindFirstChild(name)
@@ -33,6 +49,10 @@ local function ensureFolder(parent, name)
 		f.Parent = parent
 	end
 	return f
+end
+
+local function mundoFolder()
+	return ensureFolder(workspace, "Mundo")
 end
 
 local function mkPart(name, size, pos, color, parent, opts)
@@ -97,16 +117,22 @@ local function terrainGroundY(x, z)
 	return hit and hit.Position.Y or 0
 end
 
-local function clearZone()
-	for _, n in ipairs({ "Mapa", "EnemySpawns", "GreyboxMap", "Baseplate" }) do
-		local x = workspace:FindFirstChild(n)
-		if x then x:Destroy() end
+local function clearWorld()
+	local mundo = workspace:FindFirstChild("Mundo")
+	if mundo then
+		mundo:Destroy()
 	end
-	local resourceNodes = ensureFolder(workspace, "ResourceNodes")
-	ensureFolder(resourceNodes, "Trees"):ClearAllChildren()
-	ensureFolder(resourceNodes, "FoodBushes"):ClearAllChildren()
-	ensureFolder(workspace, "Structures"):ClearAllChildren() -- construções ficam pra trás ao avançar (doc 5.3)
+	for _, n in ipairs({ "Mapa", "GreyboxMap", "Baseplate" }) do -- nomes de builds legados
+		local x = workspace:FindFirstChild(n)
+		if x then
+			x:Destroy()
+		end
+	end
+	ensureFolder(workspace, "EnemySpawns"):ClearAllChildren()
+	ensureFolder(workspace, "ResourceNodes"):ClearAllChildren()
+	ensureFolder(workspace, "Structures"):ClearAllChildren() -- construções são ativo da run (doc 5.3)
 	terrain:Clear()
+	world = nil
 end
 
 local function moveSpawnLocation(pos)
@@ -123,16 +149,57 @@ local function moveSpawnLocation(pos)
 	sl.Color = Color3.fromRGB(116, 90, 60)
 	sl.Material = Enum.Material.WoodPlanks
 end
+ZoneBuilder.moveSpawnLocation = moveSpawnLocation
+
+-- ===== grupos destrutíveis (fundação do "sem volta", doc 4.5/4.6) =====
+local function groupOf(name)
+	local g = world.groups[name]
+	if not g then
+		g = { instances = {}, regions = {}, destroyed = false }
+		world.groups[name] = g
+	end
+	return g
+end
+
+local function regInstance(name, inst)
+	table.insert(groupOf(name).instances, inst)
+end
+
+-- FillBlock com registro: destruir o grupo = Air sobre cada região registrada
+local function fillT(name, cf, size, material)
+	terrain:FillBlock(cf, size, material)
+	table.insert(groupOf(name).regions, { cf = cf, size = size })
+end
+
+function ZoneBuilder.destroyGroup(name)
+	local g = world and world.groups[name]
+	if not g or g.destroyed then
+		return false
+	end
+	g.destroyed = true
+	for _, inst in ipairs(g.instances) do
+		inst:Destroy()
+	end
+	for _, r in ipairs(g.regions) do
+		terrain:FillBlock(r.cf, r.size, Enum.Material.Air)
+	end
+	return true
+end
+
+function ZoneBuilder.isGroupDestroyed(name)
+	local g = world and world.groups[name]
+	return g ~= nil and g.destroyed
+end
+
+-- sela fisicamente uma abertura depois que o chão do outro lado foi destruído (a caravana não
+-- pode cair no vazio); jogadores a pé ainda atravessam (grupo GuardrailCaravana)
+function ZoneBuilder.sealGate(pos, alongX)
+	local size = alongX and Vector3.new(GATE_W + 12, 26, 3) or Vector3.new(3, 26, GATE_W + 12)
+	mkGuardrail(mundoFolder(), "SeloSemVolta", Vector3.new(pos.X, 10, pos.Z), size)
+end
 
 -- ===== recursos =====
-local function treesFolder()
-	return ensureFolder(ensureFolder(workspace, "ResourceNodes"), "Trees")
-end
-local function bushesFolder()
-	return ensureFolder(ensureFolder(workspace, "ResourceNodes"), "FoodBushes")
-end
-
-local function mkTree(rng, i, x, z, dead)
+local function mkTree(rng, folder, i, x, z, dead)
 	local s = rng:NextNumber(0.85, 1.25)
 	local gy = terrainGroundY(x, z)
 	local m = Instance.new("Model")
@@ -160,10 +227,10 @@ local function mkTree(rng, i, x, z, dead)
 	m:SetAttribute("NodeType", "Wood")
 	m:SetAttribute("Uses", dead and 8 or 5)
 	m:SetAttribute("MaxUses", dead and 8 or 5)
-	m.Parent = treesFolder()
+	m.Parent = folder
 end
 
-local function mkBush(rng, i, x, z)
+local function mkBush(rng, folder, i, x, z)
 	local s = rng:NextNumber(0.9, 1.2)
 	local gy = terrainGroundY(x, z)
 	local m = Instance.new("Model")
@@ -176,10 +243,10 @@ local function mkBush(rng, i, x, z)
 	m:SetAttribute("NodeType", "Food")
 	m:SetAttribute("Uses", 4)
 	m:SetAttribute("MaxUses", 4)
-	m.Parent = bushesFolder()
+	m.Parent = folder
 end
 
-local function mkCrate(i, x, z, y)
+local function mkCrate(folder, i, x, z, y)
 	-- y = altura extra acima do chão (ex.: caixa sobre a plataforma da estação); 0 = assenta no terreno
 	local baseY = terrainGroundY(x, z) + (y or 0)
 	local m = Instance.new("Model")
@@ -192,10 +259,11 @@ local function mkCrate(i, x, z, y)
 	m:SetAttribute("NodeType", "Food")
 	m:SetAttribute("Uses", 2)
 	m:SetAttribute("MaxUses", 2)
-	m.Parent = bushesFolder()
+	m.Parent = folder
 end
 
--- espalha respeitando estrada, clareira do acampamento, crista e (opcional) lago
+-- espalha em coordenadas LOCAIS do POI respeitando estrada, clareira do acampamento, crista e
+-- (opcional) lago; o placeFn recebe as coordenadas locais e soma o offset da zona
 local function scatter(rng, count, zMin, zMax, hasLake, placeFn)
 	local placed, attempts = 0, 0
 	while placed < count and attempts < count * 15 do
@@ -215,101 +283,121 @@ local function scatter(rng, count, zMin, zMax, hasLake, placeFn)
 	end
 end
 
--- ===== POI =====
-function ZoneBuilder.buildPOI(kind)
+-- ===== POI (agora com origem no mundo contínuo + portões pros corredores) =====
+-- gates = { south = bool, north = bool }: carva a abertura na muralha onde um corredor conecta
+local function buildPOI(kind, id, center, gates)
 	local cfg = KIND_CONFIG[kind] or KIND_CONFIG.planicie
-	clearZone()
 	local rng = Random.new()
+	local ox, oz = center.X, center.Z
+	local grp = id
 
 	-- terreno base
-	terrain:FillBlock(CFrame.new(0, -6, 0), Vector3.new(HALF * 2, 12, HALF * 2), Enum.Material.Grass)
-	replaceGround(Vector3.new(-8, -10, -HALF), Vector3.new(8, 4, HALF), Enum.Material.Grass, Enum.Material.Ground)
-	replaceGround(Vector3.new(-34, -10, -78), Vector3.new(34, 4, -18), Enum.Material.Grass, Enum.Material.Ground)
-	replaceGround(Vector3.new(-HALF, -10, 38), Vector3.new(HALF, 4, HALF), Enum.Material.Grass, Enum.Material.LeafyGrass)
-	replaceGround(Vector3.new(-52, -10, 96), Vector3.new(52, 4, 152), Enum.Material.LeafyGrass, Enum.Material.Mud)
+	fillT(grp, CFrame.new(ox, -6, oz), Vector3.new(HALF * 2, 12, HALF * 2), Enum.Material.Grass)
+	replaceGround(Vector3.new(ox - 8, -10, oz - HALF), Vector3.new(ox + 8, 4, oz + HALF), Enum.Material.Grass, Enum.Material.Ground)
+	replaceGround(Vector3.new(ox - 34, -10, oz - 78), Vector3.new(ox + 34, 4, oz - 18), Enum.Material.Grass, Enum.Material.Ground)
+	replaceGround(Vector3.new(ox - HALF, -10, oz + 38), Vector3.new(ox + HALF, 4, oz + HALF), Enum.Material.Grass, Enum.Material.LeafyGrass)
+	replaceGround(Vector3.new(ox - 52, -10, oz + 96), Vector3.new(ox + 52, 4, oz + 152), Enum.Material.LeafyGrass, Enum.Material.Mud)
 	if cfg.lake then
-		replaceGround(Vector3.new(-122, -10, -157), Vector3.new(-58, 4, -93), Enum.Material.Grass, Enum.Material.Sand)
-		terrain:FillBlock(CFrame.new(-90, 0, -125), Vector3.new(48, 8, 48), Enum.Material.Air)
-		terrain:FillBlock(CFrame.new(-90, -3.5, -125), Vector3.new(40, 5, 40), Enum.Material.Water)
+		replaceGround(Vector3.new(ox - 122, -10, oz - 157), Vector3.new(ox - 58, 4, oz - 93), Enum.Material.Grass, Enum.Material.Sand)
+		terrain:FillBlock(CFrame.new(ox - 90, 0, oz - 125), Vector3.new(48, 8, 48), Enum.Material.Air)
+		fillT(grp, CFrame.new(ox - 90, -3.5, oz - 125), Vector3.new(40, 5, 40), Enum.Material.Water)
 	end
 	-- crista do canyon + passagem única
-	terrain:FillBlock(CFrame.new(-124, 6, RIDGE_Z), Vector3.new(232, 16, 14), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(124, 6, RIDGE_Z), Vector3.new(232, 16, 14), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(-130, 14, RIDGE_Z), Vector3.new(212, 10, 10), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(130, 14, RIDGE_Z), Vector3.new(212, 10, 10), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox - 124, 6, oz + RIDGE_Z), Vector3.new(232, 16, 14), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox + 124, 6, oz + RIDGE_Z), Vector3.new(232, 16, 14), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox - 130, 14, oz + RIDGE_Z), Vector3.new(212, 10, 10), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox + 130, 14, oz + RIDGE_Z), Vector3.new(212, 10, 10), Enum.Material.Rock)
 	-- perímetro
-	terrain:FillBlock(CFrame.new(0, 10, HALF - 6), Vector3.new(HALF * 2 + 40, 32, 28), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(0, 10, -(HALF - 6)), Vector3.new(HALF * 2 + 40, 32, 28), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(HALF - 6, 10, 0), Vector3.new(28, 32, HALF * 2 + 40), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(-(HALF - 6), 10, 0), Vector3.new(28, 32, HALF * 2 + 40), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox, 10, oz + HALF - 6), Vector3.new(HALF * 2 + 40, 32, 28), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox, 10, oz - (HALF - 6)), Vector3.new(HALF * 2 + 40, 32, 28), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox + HALF - 6, 10, oz), Vector3.new(28, 32, HALF * 2 + 40), Enum.Material.Rock)
+	fillT(grp, CFrame.new(ox - (HALF - 6), 10, oz), Vector3.new(28, 32, HALF * 2 + 40), Enum.Material.Rock)
+	-- portões: carva a abertura da estrada na muralha e re-nivela o chão do vão
+	local function carveGate(wallZ)
+		terrain:FillBlock(CFrame.new(ox, 14, wallZ), Vector3.new(GATE_W - 12, 28, 36), Enum.Material.Air)
+		fillT(grp, CFrame.new(ox, -2, wallZ), Vector3.new(GATE_W - 12, 4, 36), Enum.Material.Ground)
+	end
+	if gates and gates.south then
+		carveGate(oz - (HALF - 6))
+	end
+	if gates and gates.north then
+		carveGate(oz + HALF - 6)
+	end
 
 	local mapa = Instance.new("Model")
-	mapa.Name = "Mapa"
-	mapa.Parent = workspace
+	mapa.Name = "Mapa_" .. id
+	mapa.Parent = mundoFolder()
+	regInstance(grp, mapa)
 
-	mkPart("PilarOeste", Vector3.new(3, 14, 8), Vector3.new(-6.5, 7, RIDGE_Z), ROCK_COLOR, mapa)
-	mkPart("PilarLeste", Vector3.new(3, 14, 8), Vector3.new(6.5, 7, RIDGE_Z), ROCK_COLOR, mapa)
-	mkPart("GapMarker", Vector3.new(10, 0.2, 6), Vector3.new(0, terrainGroundY(0, RIDGE_Z) + 0.12, RIDGE_Z),
+	mkPart("PilarOeste", Vector3.new(3, 14, 8), Vector3.new(ox - 6.5, 7, oz + RIDGE_Z), ROCK_COLOR, mapa)
+	mkPart("PilarLeste", Vector3.new(3, 14, 8), Vector3.new(ox + 6.5, 7, oz + RIDGE_Z), ROCK_COLOR, mapa)
+	mkPart("GapMarker", Vector3.new(10, 0.2, 6), Vector3.new(ox, terrainGroundY(ox, oz + RIDGE_Z) + 0.12, oz + RIDGE_Z),
 		Color3.fromRGB(80, 200, 120), mapa, { CanCollide = false, Transparency = 0.5, Material = Enum.Material.Neon })
 
 	-- círculo de fogueira (sugere onde construir)
-	local circY = terrainGroundY(13, -42)
-	mkPart("CirculoFogueira", Vector3.new(4.4, 0.2, 4.4), Vector3.new(13, circY + 0.1, -42), Color3.fromRGB(45, 40, 36), mapa,
+	local circY = terrainGroundY(ox + 13, oz - 42)
+	mkPart("CirculoFogueira", Vector3.new(4.4, 0.2, 4.4), Vector3.new(ox + 13, circY + 0.1, oz - 42), Color3.fromRGB(45, 40, 36), mapa,
 		{ CanCollide = false, Material = Enum.Material.Ground })
 	for k = 1, 6 do
 		local ang = (k / 6) * math.pi * 2
-		local fx, fz = 13 + math.cos(ang) * 2.4, -42 + math.sin(ang) * 2.4
+		local fx, fz = ox + 13 + math.cos(ang) * 2.4, oz - 42 + math.sin(ang) * 2.4
 		mkPart("PedraFogueira" .. k, Vector3.new(1.2, 0.9, 1.1),
 			Vector3.new(fx, terrainGroundY(fx, fz) + 0.35, fz), ROCK_COLOR, mapa)
 	end
 
 	-- pedras decorativas
-	scatter(rng, cfg.rocks, -220, 215, cfg.lake, function(i, x, z)
+	scatter(rng, cfg.rocks, -220, 215, cfg.lake, function(i, lx, lz)
+		local x, z = ox + lx, oz + lz
 		local s = rng:NextNumber(2.4, 6)
 		local ry = terrainGroundY(x, z) + s * 0.3
 		local p = mkPart("Pedra" .. i, Vector3.new(s, s * 0.7, s * 0.9), Vector3.new(x, ry, z), ROCK_COLOR, mapa)
 		p.CFrame = CFrame.new(x, ry, z) * CFrame.Angles(rng:NextNumber(-0.2, 0.2), rng:NextNumber(0, 6.28), rng:NextNumber(-0.2, 0.2))
 	end)
 
-	-- recursos: floresta ao sul, madeira seca (mais usos, mais risco) no norte
-	scatter(rng, cfg.trees, -220, 8, cfg.lake, function(i, x, z)
-		mkTree(rng, i, x, z, false)
+	-- recursos por zona: ResourceNodes/<id>/Trees|FoodBushes (o nome interno "Trees"/"FoodBushes"
+	-- é o contrato com o clique de coleta do cliente)
+	local resZone = ensureFolder(ensureFolder(workspace, "ResourceNodes"), id)
+	regInstance(grp, resZone)
+	local treesF = ensureFolder(resZone, "Trees")
+	local bushesF = ensureFolder(resZone, "FoodBushes")
+	scatter(rng, cfg.trees, -220, 8, cfg.lake, function(i, lx, lz)
+		mkTree(rng, treesF, i, ox + lx, oz + lz, false)
 	end)
-	scatter(rng, cfg.deadTrees, 52, 200, false, function(i, x, z)
-		mkTree(rng, 100 + i, x, z, true)
+	scatter(rng, cfg.deadTrees, 52, 200, false, function(i, lx, lz)
+		mkTree(rng, treesF, 100 + i, ox + lx, oz + lz, true)
 	end)
-	scatter(rng, cfg.bushes, -220, 4, cfg.lake, function(i, x, z)
-		mkBush(rng, i, x, z)
+	scatter(rng, cfg.bushes, -220, 4, cfg.lake, function(i, lx, lz)
+		mkBush(rng, bushesF, i, ox + lx, oz + lz)
 	end)
 
 	-- features por tipo
 	if kind == "estacao" then
-		mkPart("Plataforma", Vector3.new(22, 1.5, 10), Vector3.new(26, 0.75, -46), Color3.fromRGB(118, 92, 62), mapa,
+		mkPart("Plataforma", Vector3.new(22, 1.5, 10), Vector3.new(ox + 26, 0.75, oz - 46), Color3.fromRGB(118, 92, 62), mapa,
 			{ Material = Enum.Material.WoodPlanks })
-		mkPart("TrilhoOeste", Vector3.new(0.5, 0.5, 110), Vector3.new(16.6, 0.25, -60), Color3.fromRGB(70, 70, 78), mapa,
+		mkPart("TrilhoOeste", Vector3.new(0.5, 0.5, 110), Vector3.new(ox + 16.6, 0.25, oz - 60), Color3.fromRGB(70, 70, 78), mapa,
 			{ Material = Enum.Material.Metal })
-		mkPart("TrilhoLeste", Vector3.new(0.5, 0.5, 110), Vector3.new(20.0, 0.25, -60), Color3.fromRGB(70, 70, 78), mapa,
+		mkPart("TrilhoLeste", Vector3.new(0.5, 0.5, 110), Vector3.new(ox + 20.0, 0.25, oz - 60), Color3.fromRGB(70, 70, 78), mapa,
 			{ Material = Enum.Material.Metal })
 		for d = 0, 10 do
-			mkPart("Dormente" .. d, Vector3.new(6, 0.4, 1.2), Vector3.new(18.3, 0.2, -110 + d * 10),
+			mkPart("Dormente" .. d, Vector3.new(6, 0.4, 1.2), Vector3.new(ox + 18.3, 0.2, oz - 110 + d * 10),
 				Color3.fromRGB(80, 60, 40), mapa, { Material = Enum.Material.Wood })
 		end
 		for c = 1, cfg.crates do
-			mkCrate(c, 20 + c * 5, -44, 1.5)
+			mkCrate(bushesF, c, ox + 20 + c * 5, oz - 44, 1.5)
 		end
 	elseif kind == "mina" then
-		terrain:FillBlock(CFrame.new(150, 8, -70), Vector3.new(44, 20, 34), Enum.Material.Rock)
-		mkPart("MinaBoca", Vector3.new(2, 9, 8), Vector3.new(127.5, 4.5, -70), Color3.fromRGB(15, 13, 12), mapa,
+		fillT(grp, CFrame.new(ox + 150, 8, oz - 70), Vector3.new(44, 20, 34), Enum.Material.Rock)
+		mkPart("MinaBoca", Vector3.new(2, 9, 8), Vector3.new(ox + 127.5, 4.5, oz - 70), Color3.fromRGB(15, 13, 12), mapa,
 			{ Material = Enum.Material.Basalt })
-		mkPart("MinaVigaSul", Vector3.new(1, 10, 1), Vector3.new(126, 5, -75), Color3.fromRGB(96, 70, 44), mapa,
+		mkPart("MinaVigaSul", Vector3.new(1, 10, 1), Vector3.new(ox + 126, 5, oz - 75), Color3.fromRGB(96, 70, 44), mapa,
 			{ Material = Enum.Material.Wood })
-		mkPart("MinaVigaNorte", Vector3.new(1, 10, 1), Vector3.new(126, 5, -65), Color3.fromRGB(96, 70, 44), mapa,
+		mkPart("MinaVigaNorte", Vector3.new(1, 10, 1), Vector3.new(ox + 126, 5, oz - 65), Color3.fromRGB(96, 70, 44), mapa,
 			{ Material = Enum.Material.Wood })
-		mkPart("MinaVerga", Vector3.new(1, 1, 12), Vector3.new(126, 10.5, -70), Color3.fromRGB(96, 70, 44), mapa,
+		mkPart("MinaVerga", Vector3.new(1, 1, 12), Vector3.new(ox + 126, 10.5, oz - 70), Color3.fromRGB(96, 70, 44), mapa,
 			{ Material = Enum.Material.Wood })
 	elseif kind == "acampamento" then
 		for t, pos in ipairs({ { -26, -62 }, { 28, -66 }, { -22, -26 } }) do
-			local x, z = pos[1], pos[2]
+			local x, z = ox + pos[1], oz + pos[2]
 			local a = mkPart("TendaOeste" .. t, Vector3.new(0.6, 7, 5), Vector3.new(x - 1.5, 2.4, z),
 				Color3.fromRGB(48, 40, 34), mapa, { Material = Enum.Material.Wood })
 			a.CFrame = CFrame.new(x - 1.5, 2.4, z) * CFrame.Angles(0, 0, math.rad(35))
@@ -320,101 +408,191 @@ function ZoneBuilder.buildPOI(kind)
 				{ CanCollide = false, Material = Enum.Material.Ground })
 		end
 		for c = 1, cfg.crates do
-			mkCrate(c, c == 1 and -30 or 34, c == 1 and -40 or -50, 0)
+			mkCrate(bushesF, c, ox + (c == 1 and -30 or 34), oz + (c == 1 and -40 or -50), 0)
 		end
 	elseif kind == "boss" then
-		-- covil: portal escuro onde a estrada termina (o boss em si é o passo 8)
-		mkPart("CovilPilarOeste", Vector3.new(6, 20, 6), Vector3.new(-9, 10, 150), Color3.fromRGB(40, 36, 40), mapa,
+		-- covil: portal escuro onde a estrada termina
+		mkPart("CovilPilarOeste", Vector3.new(6, 20, 6), Vector3.new(ox - 9, 10, oz + 150), Color3.fromRGB(40, 36, 40), mapa,
 			{ Material = Enum.Material.Basalt })
-		mkPart("CovilPilarLeste", Vector3.new(6, 20, 6), Vector3.new(9, 10, 150), Color3.fromRGB(40, 36, 40), mapa,
+		mkPart("CovilPilarLeste", Vector3.new(6, 20, 6), Vector3.new(ox + 9, 10, oz + 150), Color3.fromRGB(40, 36, 40), mapa,
 			{ Material = Enum.Material.Basalt })
-		mkPart("CovilVerga", Vector3.new(26, 6, 6), Vector3.new(0, 21, 150), Color3.fromRGB(35, 32, 36), mapa,
+		mkPart("CovilVerga", Vector3.new(26, 6, 6), Vector3.new(ox, 21, oz + 150), Color3.fromRGB(35, 32, 36), mapa,
 			{ Material = Enum.Material.Basalt })
-		mkPart("CovilFundo", Vector3.new(20, 18, 2), Vector3.new(0, 9, 154), Color3.fromRGB(12, 10, 14), mapa,
+		mkPart("CovilFundo", Vector3.new(20, 18, 2), Vector3.new(ox, 9, oz + 154), Color3.fromRGB(12, 10, 14), mapa,
 			{ Material = Enum.Material.Basalt })
 		for b = 1, 6 do
-			local ox, oz = rng:NextNumber(-30, 30), rng:NextNumber(60, 140)
+			local bx, bz = ox + rng:NextNumber(-30, 30), oz + rng:NextNumber(60, 140)
 			mkPart("Osso" .. b, Vector3.new(rng:NextNumber(1.5, 3), 0.6, 0.6),
-				Vector3.new(ox, terrainGroundY(ox, oz) + 0.3, oz),
+				Vector3.new(bx, terrainGroundY(bx, bz) + 0.3, bz),
 				Color3.fromRGB(220, 214, 196), mapa, { Material = Enum.Material.SmoothPlastic })
 		end
 	end
 
-	-- spawns de inimigos (norte, atrás do funil)
-	local spawnsFolder = Instance.new("Folder")
-	spawnsFolder.Name = "EnemySpawns"
+	-- spawns de inimigos por zona (norte, atrás do funil): EnemySpawns/<id>
+	local spawnsFolder = ensureFolder(ensureFolder(workspace, "EnemySpawns"), id)
+	regInstance(grp, spawnsFolder)
 	for i, xz in ipairs({ { -30, 118 }, { 0, 124 }, { 30, 118 }, { -14, 136 }, { 16, 136 } }) do
-		local pad = mkPart("Spawn" .. i, Vector3.new(8, 0.4, 8), Vector3.new(xz[1], terrainGroundY(xz[1], xz[2]) + 0.2, xz[2]),
+		local sx, sz = ox + xz[1], oz + xz[2]
+		local pad = mkPart("Spawn" .. i, Vector3.new(8, 0.4, 8), Vector3.new(sx, terrainGroundY(sx, sz) + 0.2, sz),
 			Color3.fromRGB(170, 60, 60), spawnsFolder, { CanCollide = false, Transparency = 0.55, Material = Enum.Material.Neon })
 		pad.Locked = true
 	end
-	spawnsFolder.Parent = workspace
 
-	moveSpawnLocation(Vector3.new(-16, 0.5, -42))
-
-	return {
+	local zone = {
+		id = id,
 		kind = kind,
-		campCf = CFrame.new(0, CARAVAN_Y, CAMP_Z), -- caravana para aqui (meio-sul do mapa, doc 4.5 etapa 3)
-		entryCf = CFrame.new(0, CARAVAN_Y, -200), -- entra pelo sul
-		exitCf = CFrame.new(0, CARAVAN_Y, 120), -- sai pelo norte, através da passagem
-		ridgeZ = RIDGE_Z,
-		gapPos = Vector3.new(0, 3, RIDGE_Z),
+		center = center,
+		-- limites físicos do POI (decidem permanência vs avanço no amanhecer, doc 5.4 rev.3)
+		bounds = { minX = ox - HALF, maxX = ox + HALF, minZ = oz - HALF, maxZ = oz + HALF },
+		-- faixa de chegada logo depois do portão sul (volume de trigger checado por poll no servidor:
+		-- .Touched não é confiável com StreamingEnabled + física no cliente do motorista)
+		arrivalRect = { minX = ox - 34, maxX = ox + 34, minZ = oz - HALF + 26, maxZ = oz - HALF + 60 },
+		campCf = CFrame.new(ox, CARAVAN_Y, oz + CAMP_Z),
+		campPos = Vector3.new(ox, 0, oz + CAMP_Z),
+		spawnPos = Vector3.new(ox - 16, 0.5, oz - 42),
+		ridgeZ = oz + RIDGE_Z,
+		gapPos = Vector3.new(ox, 3, oz + RIDGE_Z),
+		covilPos = kind == "boss" and Vector3.new(ox, 5, oz + 142) or nil,
 	}
+	world.zones[id] = zone
+	return zone
 end
 
--- ===== zona de transição (doc 4.5 etapa 2: corredor isolado, caravana em linha reta, jogadores ao redor) =====
-function ZoneBuilder.buildTransition()
-	clearZone()
-	local rng = Random.new()
-
-	terrain:FillBlock(CFrame.new(0, -6, 0), Vector3.new(200, 12, HALF * 2), Enum.Material.LeafyGrass)
-	replaceGround(Vector3.new(-8, -10, -HALF), Vector3.new(8, 4, HALF), Enum.Material.LeafyGrass, Enum.Material.Ground)
-	-- paredões laterais e tampas
-	terrain:FillBlock(CFrame.new(-92, 10, 0), Vector3.new(28, 40, HALF * 2 + 40), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(92, 10, 0), Vector3.new(28, 40, HALF * 2 + 40), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(0, 10, HALF - 6), Vector3.new(240, 40, 28), Enum.Material.Rock)
-	terrain:FillBlock(CFrame.new(0, 10, -(HALF - 6)), Vector3.new(240, 40, 28), Enum.Material.Rock)
-
+-- ===== corredores e plazas (trechos autorados entre POIs) =====
+-- corredor no eixo Z: chão + taludes de pedra + guardrails invisíveis
+local function corridorZ(grp, x, z1, z2)
+	local mid, len = (z1 + z2) / 2, math.abs(z2 - z1)
+	fillT(grp, CFrame.new(x, -6, mid), Vector3.new(CORR_HALF * 2, 12, len), Enum.Material.Ground)
+	fillT(grp, CFrame.new(x - BERM_OFF, 8, mid), Vector3.new(12, 20, len), Enum.Material.Rock)
+	fillT(grp, CFrame.new(x + BERM_OFF, 8, mid), Vector3.new(12, 20, len), Enum.Material.Rock)
 	local mapa = Instance.new("Model")
-	mapa.Name = "Mapa"
-	mapa.Parent = workspace
+	mapa.Name = "Corr_" .. grp .. "_" .. math.floor(mid)
+	mapa.Parent = mundoFolder()
+	regInstance(grp, mapa)
+	mkGuardrail(mapa, "GuardrailOeste", Vector3.new(x - GUARD_OFF, 9, mid), Vector3.new(2, 22, len))
+	mkGuardrail(mapa, "GuardrailLeste", Vector3.new(x + GUARD_OFF, 9, mid), Vector3.new(2, 22, len))
+end
 
-	-- guardrail provisório (passo 2): a caravana fica presa na faixa da estrada; jogadores
-	-- atravessam as paredes (grupo de colisão) pra coletar a vegetação das laterais
-	mkGuardrail(mapa, "GuardrailOeste", Vector3.new(-16, 9, 0), Vector3.new(2, 22, HALF * 2))
-	mkGuardrail(mapa, "GuardrailLeste", Vector3.new(16, 9, 0), Vector3.new(2, 22, HALF * 2))
+-- corredor no eixo X
+local function corridorX(grp, z, x1, x2)
+	local mid, len = (x1 + x2) / 2, math.abs(x2 - x1)
+	fillT(grp, CFrame.new(mid, -6, z), Vector3.new(len, 12, CORR_HALF * 2), Enum.Material.Ground)
+	fillT(grp, CFrame.new(mid, 8, z - BERM_OFF), Vector3.new(len, 20, 12), Enum.Material.Rock)
+	fillT(grp, CFrame.new(mid, 8, z + BERM_OFF), Vector3.new(len, 20, 12), Enum.Material.Rock)
+	local mapa = Instance.new("Model")
+	mapa.Name = "Corr_" .. grp .. "_" .. math.floor(mid)
+	mapa.Parent = mundoFolder()
+	regInstance(grp, mapa)
+	mkGuardrail(mapa, "GuardrailSul", Vector3.new(mid, 9, z - GUARD_OFF), Vector3.new(len, 22, 2))
+	mkGuardrail(mapa, "GuardrailNorte", Vector3.new(mid, 9, z + GUARD_OFF), Vector3.new(len, 22, 2))
+end
 
-	-- vegetação e pedras esparsas ao longo do corredor (dá o que coletar na travessia)
-	for i = 1, 10 do
-		local side = rng:NextInteger(0, 1) == 0 and -1 or 1
-		mkTree(rng, i, side * rng:NextNumber(16, 66), rng:NextNumber(-190, 190), rng:NextNumber() < 0.3)
+-- plaza de junção (fork/merge): chão aberto, taludes com aberturas nos lados conectados
+-- e anel de guardrail com os mesmos vãos
+local function plaza(grp, center, openings)
+	local ox, oz = center.X, center.Z
+	fillT(grp, CFrame.new(ox, -6, oz), Vector3.new(PLAZA_HALF * 2, 12, PLAZA_HALF * 2), Enum.Material.Ground)
+	local mapa = Instance.new("Model")
+	mapa.Name = "Plaza_" .. grp
+	mapa.Parent = mundoFolder()
+	regInstance(grp, mapa)
+	local B = PLAZA_HALF + 6 -- centro do talude
+	local G = PLAZA_HALF - 4 -- anel de guardrail
+	local span = PLAZA_HALF * 2 + 24
+	-- cada lado: talude (e guardrail) inteiro, ou em duas metades deixando o vão da estrada
+	local function side(dir) -- dir: "N","S","E","W"
+		local open = openings[dir]
+		local horizontal = dir == "N" or dir == "S"
+		local sign = (dir == "N" or dir == "E") and 1 or -1
+		local wallC = horizontal and Vector3.new(ox, 8, oz + sign * B) or Vector3.new(ox + sign * B, 8, oz)
+		local guardC = horizontal and Vector3.new(ox, 9, oz + sign * G) or Vector3.new(ox + sign * G, 9, oz)
+		if not open then
+			fillT(grp, CFrame.new(wallC), horizontal and Vector3.new(span, 20, 12) or Vector3.new(12, 20, span), Enum.Material.Rock)
+			mkGuardrail(mapa, "Guard" .. dir, guardC, horizontal and Vector3.new(span, 22, 2) or Vector3.new(2, 22, span))
+		else
+			local segLen = (span - GATE_W) / 2
+			local off = (GATE_W + segLen) / 2
+			for _, s2 in ipairs({ -1, 1 }) do
+				local wallPos = horizontal and Vector3.new(ox + s2 * off, 8, oz + sign * B) or Vector3.new(ox + sign * B, 8, oz + s2 * off)
+				local guardPos = horizontal and Vector3.new(ox + s2 * off, 9, oz + sign * G) or Vector3.new(ox + sign * G, 9, oz + s2 * off)
+				fillT(grp, CFrame.new(wallPos), horizontal and Vector3.new(segLen, 20, 12) or Vector3.new(12, 20, segLen), Enum.Material.Rock)
+				mkGuardrail(mapa, "Guard" .. dir, guardPos, horizontal and Vector3.new(segLen, 22, 2) or Vector3.new(2, 22, segLen))
+			end
+		end
 	end
-	for i = 1, 4 do
-		local side = rng:NextInteger(0, 1) == 0 and -1 or 1
-		mkBush(rng, i, side * rng:NextNumber(16, 66), rng:NextNumber(-180, 180))
-	end
-	for i = 1, 8 do
-		local side = rng:NextInteger(0, 1) == 0 and -1 or 1
-		local s = rng:NextNumber(2.4, 6)
-		local x, z = side * rng:NextNumber(14, 70), rng:NextNumber(-200, 200)
-		local ry = terrainGroundY(x, z) + s * 0.3
-		local p = mkPart("Pedra" .. i, Vector3.new(s, s * 0.7, s * 0.9), Vector3.new(x, ry, z), ROCK_COLOR, mapa)
-		p.CFrame = CFrame.new(x, ry, z) * CFrame.Angles(0, rng:NextNumber(0, 6.28), 0)
+	side("N")
+	side("S")
+	side("E")
+	side("W")
+end
+
+-- ===== o mundo inteiro da run (doc 4.6: grafo abstrato decide o layout; geometria autorada) =====
+-- Layout fixo do MVP, espelhando a forma fixa do RouteGraph:
+--   n1 (0,0) -> plaza do fork (0,460) -> braços em L -> n2a (-380,1040) | n2b (380,1040)
+--   -> braços de merge -> plaza (0,1500) -> n3 (0,1840) -> corredor -> boss (0,2460)
+-- Grupos destrutíveis: "n1", "corr_fork", "arm_n2a"/"arm_n2b" (braços de ida E volta do ramo),
+-- "n2a"/"n2b", "corr_merge", "n3", "corr_boss", "boss".
+local WORLD_CENTERS = {
+	n1 = Vector3.new(0, 0, 0),
+	n2a = Vector3.new(-380, 0, 1040),
+	n2b = Vector3.new(380, 0, 1040),
+	n3 = Vector3.new(0, 0, 1840),
+	boss = Vector3.new(0, 0, 2460),
+}
+local FORK_PLAZA = Vector3.new(0, 0, 460)
+local MERGE_PLAZA = Vector3.new(0, 0, 1500)
+
+function ZoneBuilder.buildWorld(graph)
+	clearWorld()
+	world = { zones = {}, groups = {} }
+
+	-- POIs (tipos vêm do grafo abstrato; posição é o slot fixo do layout)
+	buildPOI(graph.nodes.n1.kind, "n1", WORLD_CENTERS.n1, { south = false, north = true })
+	buildPOI(graph.nodes.n2a.kind, "n2a", WORLD_CENTERS.n2a, { south = true, north = true })
+	buildPOI(graph.nodes.n2b.kind, "n2b", WORLD_CENTERS.n2b, { south = true, north = true })
+	buildPOI(graph.nodes.n3.kind, "n3", WORLD_CENTERS.n3, { south = true, north = true })
+	buildPOI(graph.nodes.boss.kind, "boss", WORLD_CENTERS.boss, { south = true, north = false })
+
+	-- corredor pré-fork + plaza do fork (aberturas: sul=n1, oeste/leste=ramos)
+	corridorZ("corr_fork", 0, HALF - 14, FORK_PLAZA.Z - PLAZA_HALF + 8)
+	plaza("corr_fork", FORK_PLAZA, { S = true, E = true, W = true, N = false })
+
+	-- braços do fork e do merge, por ramo (grupo do ramo: some junto com ele)
+	for _, branch in ipairs({ { id = "n2a", sign = -1 }, { id = "n2b", sign = 1 } }) do
+		local grp = "arm_" .. branch.id
+		local bx = WORLD_CENTERS[branch.id].X
+		local bz = WORLD_CENTERS[branch.id].Z
+		-- ida: plaza do fork -> POI do ramo (braço em L, eixos alinhados)
+		corridorX(grp, FORK_PLAZA.Z, branch.sign * (PLAZA_HALF - 8), bx + branch.sign * BERM_OFF)
+		corridorZ(grp, bx, FORK_PLAZA.Z - BERM_OFF, bz - HALF + 14)
+		-- volta: POI do ramo -> plaza do merge
+		corridorZ(grp, bx, bz + HALF - 14, MERGE_PLAZA.Z + BERM_OFF)
+		corridorX(grp, MERGE_PLAZA.Z, bx - branch.sign * BERM_OFF, branch.sign * (PLAZA_HALF - 8))
 	end
 
-	moveSpawnLocation(Vector3.new(-12, 0.5, -188))
+	-- plaza do merge (aberturas: oeste/leste=ramos, norte=n3) + stub até o portão de n3
+	plaza("corr_merge", MERGE_PLAZA, { S = false, E = true, W = true, N = true })
+	corridorZ("corr_merge", 0, MERGE_PLAZA.Z + PLAZA_HALF - 8, WORLD_CENTERS.n3.Z - HALF + 14)
 
-	return {
-		kind = "transicao",
-		startCf = CFrame.new(0, CARAVAN_Y, -200),
-		endCf = CFrame.new(0, CARAVAN_Y, 200),
-		ridgeZ = nil, -- sem funil aqui
+	-- corredor n3 -> covil
+	corridorZ("corr_boss", 0, WORLD_CENTERS.n3.Z + HALF - 14, WORLD_CENTERS.boss.Z - HALF + 14)
+
+	-- retângulos de commit do fork (passo 4): dentro de cada braço, passada a plaza
+	world.commitRects = {
+		n2a = { minX = -180, maxX = -140, minZ = FORK_PLAZA.Z - CORR_HALF, maxZ = FORK_PLAZA.Z + CORR_HALF },
+		n2b = { minX = 140, maxX = 180, minZ = FORK_PLAZA.Z - CORR_HALF, maxZ = FORK_PLAZA.Z + CORR_HALF },
 	}
+
+	return world
+end
+
+function ZoneBuilder.getWorld()
+	return world
 end
 
 -- ===== lobby (passo 9): posto de partida com catálogo; zona pequena e segura, sem funil e sem inimigos =====
 function ZoneBuilder.buildLobby()
-	clearZone()
+	clearWorld()
 
 	terrain:FillBlock(CFrame.new(0, -6, 0), Vector3.new(160, 12, 160), Enum.Material.Grass)
 	replaceGround(Vector3.new(-26, -10, -26), Vector3.new(26, 4, 34), Enum.Material.Grass, Enum.Material.Ground)
@@ -425,8 +603,8 @@ function ZoneBuilder.buildLobby()
 	terrain:FillBlock(CFrame.new(-76, 6, 0), Vector3.new(16, 28, 176), Enum.Material.Rock)
 
 	local mapa = Instance.new("Model")
-	mapa.Name = "Mapa"
-	mapa.Parent = workspace
+	mapa.Name = "Mapa_lobby"
+	mapa.Parent = mundoFolder()
 
 	-- fogueira permanente do posto
 	for k = 1, 6 do
@@ -462,6 +640,7 @@ function ZoneBuilder.buildLobby()
 	moveSpawnLocation(Vector3.new(-14, 0.5, -12))
 
 	return {
+		id = "lobby",
 		kind = "lobby",
 		caravanaCf = CFrame.new(0, CARAVAN_Y, 6),
 		startPost = post,
@@ -528,6 +707,8 @@ function ZoneBuilder.buildCaravana()
 
 	local m = Instance.new("Model")
 	m.Name = "Caravana"
+	-- a caravana é o pivô do gameplay: nunca pode ser descarregada pelo streaming no cliente
+	m.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
 
 	local root = Instance.new("Part")
 	root.Name = "Root"
@@ -780,7 +961,7 @@ function ZoneBuilder.buildCaravana()
 	return m
 end
 
--- trava/destrava a caravana (noite, lobby, votação): Root ancorado = assembly inteiro parado.
+-- trava/destrava a caravana (noite, lobby): Root ancorado = assembly inteiro parado.
 -- Destravar zera velocidades e devolve a física pro motorista atual (se houver).
 function ZoneBuilder.setCaravanaLocked(locked)
 	rig.locked = locked
@@ -797,7 +978,7 @@ function ZoneBuilder.setCaravanaLocked(locked)
 	refreshDrive()
 end
 
--- tira todo mundo dos assentos (necessário antes de pivôs longos de troca de zona/lobby)
+-- tira todo mundo dos assentos (necessário antes de pivôs longos de lobby/início de run)
 function ZoneBuilder.unseatAll()
 	for _, s in ipairs(rig.seats) do
 		local occ = s.Parent and s.Occupant
@@ -824,7 +1005,10 @@ end
 --   require(game.ServerScriptService.ZoneBuilder).preview()
 function ZoneBuilder.preview(kind)
 	ZoneBuilder.buildCaravana()
-	local info = ZoneBuilder.buildPOI(kind or "estacao")
+	clearWorld()
+	world = { zones = {}, groups = {} }
+	local info = buildPOI(kind or "estacao", "preview", Vector3.zero, { south = false, north = true })
+	moveSpawnLocation(info.spawnPos)
 	ZoneBuilder.pivotCaravanaTo(info.campCf)
 	print("[ZoneBuilder] Preview construído: " .. (kind or "estacao"))
 	return info

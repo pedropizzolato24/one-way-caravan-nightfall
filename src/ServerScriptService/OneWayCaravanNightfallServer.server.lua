@@ -1,8 +1,12 @@
 -- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.8)
 -- Toda autoridade de HP, recursos, spawn, dano, morte, rota e economia vive AQUI.
 -- Cliente só envia intenção via RemoteEvents validados e rate-limitados.
--- Doc 4.5/5.4 (Revisão 3): a caravana é PILOTADA por um jogador (VehicleSeat); a travessia
--- entre POIs é dirigida pelo grupo, não mais NPC-driven.
+-- Doc 4.5/4.6/5.4 (Revisão 3): a caravana é PILOTADA por um jogador (VehicleSeat) e a run
+-- inteira é um MUNDO CONTÍNUO via StreamingEnabled — POIs e corredores coexistem no mesmo
+-- espaço, sem zonas isoladas, sem fade e sem teleporte dentro da run. A única "tela" restante
+-- é a fronteira lobby<->run (placeholder do TeleportService do split de places, doc 4.2).
+-- Chegada em POI é detectada por volume (poll server-side da posição da caravana: .Touched não
+-- é confiável com StreamingEnabled + física no cliente do motorista).
 -- Passo 8: boss no Covil, checkpoint, vitória/derrota (wipe) e moeda de run (doc 5.8).
 
 local Players = game:GetService("Players")
@@ -18,8 +22,9 @@ local ProfileManager = require(script.Parent.ProfileManager)
 local DAY_LENGTH = 90 -- dia completo (só quando o grupo vota ficar, ou no 1º nó)
 local NIGHT_LENGTH = 120
 local VOTE_LENGTH = 20
-local CARAVAN_ARRIVE_RADIUS = 14 -- raio (studs) pra considerar a caravana "chegou" num waypoint
 local CARAVAN_SANITY_SPEED = 60 -- teto de velocidade horizontal da caravana (anti-exploit do motorista)
+-- limites do mundo contínuo (layout fixo do MVP no ZoneBuilder); sanity-check de colocação
+local WORLD_BOUNDS = { minX = -700, maxX = 700, minZ = -300, maxZ = 2760 }
 local WAVES = { -- 3 ondas por noite, escalando em contagem
 	{ time = 6, count = 3 },
 	{ time = 45, count = 4 },
@@ -57,7 +62,6 @@ local HEAL_PER_FOOD = 25
 local COLLECT_RANGE = 14
 local PLACE_RANGE = 35
 local DOWNED_HP = 10
-local MAP_LIMIT = 240
 local CAMP_FALLBACK = Vector3.new(0, 3, -47)
 local MAX_HORIZ_SPEED = 60 -- sanity-check anti speed/teleport (doc 4.1); só horizontal p/ não punir queda
 local COSTS = {
@@ -78,6 +82,8 @@ local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Vote =
 
 -- zona atual (funil, posições da caravana); preenchida pelo loop da run
 local CurrentZone = nil
+-- mundo contínuo da run (zonas + grupos destrutíveis); retorno de ZoneBuilder.buildWorld
+local RunWorld = nil
 -- estado da run: active liga a checagem de wipe; defeated interrompe as fases
 local runState = { active = false, defeated = false }
 
@@ -132,6 +138,16 @@ if not atmosphere then
 end
 atmosphere.Density = 0.3
 atmosphere.Haze = 1.6
+
+-- ===== mundo contínuo por streaming (doc 4.5/4.6/4.9: StreamingEnabled ligado) =====
+-- Um único espaço por run; o cliente carrega/descarrega geometria por distância do jogador,
+-- sem loading screen nem teleporte entre POIs. Radii enxutos p/ mobile/Chromebook (doc 4.9).
+workspace.StreamingEnabled = true
+workspace.StreamingMinRadius = 256 -- sempre carregado ao redor do jogador
+workspace.StreamingTargetRadius = 640 -- alvo de carregamento por distância
+pcall(function()
+	workspace.StreamingIntegrityMode = Enum.StreamingIntegrityMode.MinimumRadiusPause
+end)
 
 local function announce(text)
 	announceRE:FireAllClients(text)
@@ -314,7 +330,7 @@ task.spawn(function()
 	end
 end)
 
--- teleporte legítimo do servidor (trocas de zona): reseta o rastreio anti-teleport junto.
+-- teleporte legítimo do servidor (SÓ na fronteira lobby<->run): reseta o rastreio anti-teleport.
 -- Jogadores sentados na caravana são pulados (o pivô da caravana já os leva junto pelo SeatWeld).
 local function teleportPlayersBehindCaravana()
 	local caravana = workspace:FindFirstChild("Caravana")
@@ -324,6 +340,12 @@ local function teleportPlayersBehindCaravana()
 		local char = plr.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if char and not (hum and hum.SeatPart) then
+			task.spawn(function()
+				-- prefetch de streaming do destino (não bloqueia; o fade cobre o carregamento)
+				pcall(function()
+					plr:RequestStreamAroundAsync(base.Position, 1)
+				end)
+			end)
 			char:PivotTo(base * CFrame.new(-6 + (i % 4) * 4, 1.5, -12 - math.floor(i / 4) * 4))
 			lastPos[plr] = nil
 			i += 1
@@ -331,16 +353,23 @@ local function teleportPlayersBehindCaravana()
 	end
 end
 
--- espera a caravana (dirigida pelos jogadores) chegar perto de um ponto; falso se a run acabou antes
-local function waitCaravanaNear(pos, radius)
+local function rectContains(r, p)
+	return p.X >= r.minX and p.X <= r.maxX and p.Z >= r.minZ and p.Z <= r.maxZ
+end
+
+-- espera a caravana entrar na faixa de chegada de um POI diferente do atual (volume de trigger
+-- checado por poll server-side); nil se a run acabou antes
+local function waitArrival(currentId)
 	while not runState.defeated do
 		local p = campPos()
-		if (Vector3.new(p.X, 0, p.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude <= radius then
-			return true
+		for id, zone in pairs(RunWorld.zones) do
+			if id ~= currentId and not ZoneBuilder.isGroupDestroyed(id) and rectContains(zone.arrivalRect, p) then
+				return id
+			end
 		end
 		task.wait(0.3)
 	end
-	return false
+	return nil
 end
 
 -- ===== pool de inimigos (doc 4.7: object pooling obrigatório, nunca Instantiate/Destroy por onda) =====
@@ -471,12 +500,15 @@ local function syncEnemiesAlive()
 end
 
 local function pickSpawnBase()
+	-- pads da ZONA atual (EnemySpawns/<id>): no mundo contínuo cada POI tem os seus
 	local folder = workspace:FindFirstChild("EnemySpawns")
-	local pads = folder and folder:GetChildren() or {}
+	local zoneFolder = folder and CurrentZone and CurrentZone.id and folder:FindFirstChild(CurrentZone.id)
+	local pads = zoneFolder and zoneFolder:GetChildren() or {}
 	if #pads > 0 then
 		return pads[math.random(#pads)].Position
 	end
-	return Vector3.new(0, 0, 120)
+	local c = (CurrentZone and CurrentZone.center) or Vector3.zero
+	return Vector3.new(c.X, 0, c.Z + 120)
 end
 
 local function activateEnemy(e, idx, basePos)
@@ -672,7 +704,8 @@ local function stepEnemy(e)
 		if (ez - ridgeZ) * (tz - ridgeZ) < 0 then
 			local t = (ridgeZ - ez) / (tz - ez)
 			local xCross = hrp.Position.X + (targetPos.X - hrp.Position.X) * t
-			if math.abs(xCross) > 4 then
+			-- comparação relativa ao X da passagem (POIs têm offset no mundo contínuo)
+			if math.abs(xCross - CurrentZone.gapPos.X) > 4 then
 				desired = CurrentZone.gapPos
 			end
 		end
@@ -894,7 +927,7 @@ placeRE.OnServerEvent:Connect(function(plr, structType, pos)
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if not hrp then return end
 	if (pos - hrp.Position).Magnitude > PLACE_RANGE then return end
-	if math.abs(pos.X) > MAP_LIMIT or math.abs(pos.Z) > MAP_LIMIT then return end
+	if not rectContains(WORLD_BOUNDS, pos) then return end
 	local r = resources[plr]
 	if not r then return end
 	for kind, amt in pairs(cost) do
@@ -1007,6 +1040,7 @@ local function nightPhase(waveBonus)
 	nightCount += 1
 	RS:SetAttribute("Cycle", nightCount)
 	RS:SetAttribute("Phase", "Noite")
+	ZoneBuilder.setCaravanaLocked(true) -- a caravana vira acampamento fixo até o amanhecer (doc 5.4)
 	applyNightAmbience()
 	transitionClock(12, 24, 5)
 	print("[One Way Caravan: Nightfall] === NOITE " .. nightCount .. " (bônus de onda: " .. waveBonus .. ") ===")
@@ -1046,13 +1080,14 @@ local function fullDay(skipDawn)
 	phaseCountdown(DAY_LENGTH)
 end
 
-local function runVote(node, graph)
-	local options = { { id = "stay", label = "Ficar mais uma noite" } }
-	for _, cid in ipairs(node.children) do
-		local c = graph.nodes[cid]
-		local tag = c.tag and (" — rota " .. c.tag) or ""
-		table.insert(options, { id = cid, label = "Avançar: " .. c.label .. tag })
-	end
+-- Votação stay/avançar (doc 5.4). No mundo contínuo o "para qual fork" deixou de ser opção de
+-- voto: a escolha do ramo é física (dirigir até o POI, passo 4). O voto só decide ficar x avançar;
+-- o passo 6 remove a votação inteira, trocando por posição da caravana.
+local function runVote()
+	local options = {
+		{ id = "stay", label = "Ficar mais uma noite" },
+		{ id = "advance", label = "Avançar pela estrada" },
+	}
 	local valid = {}
 	for _, o in ipairs(options) do
 		valid[o.id] = o.label
@@ -1097,70 +1132,23 @@ local function runVote(node, graph)
 	return decision
 end
 
--- ===== travessia dirigida pelo grupo (doc 4.5 rev.3: caravana pilotada, não NPC-driven) =====
--- As zonas ainda são isoladas com fade+pivô entre elas (o passo 3 remove isso); dentro de cada
--- trecho, quem move a caravana é o motorista no VehicleSeat.
-local function swapZone(buildFn)
-	zoneFadeRE:FireAllClients(true)
-	task.wait(0.7)
-	local info = buildFn()
-	CurrentZone = info
-	return info
-end
-
-local function travelTo(node)
-	-- Etapa 1: amanhece; o grupo embarca e dirige até a saída norte quando quiser
-	RS:SetAttribute("Phase", "Partida")
+-- ===== travessia no mundo contínuo (doc 4.5/4.6 rev.3) =====
+-- Sem fade, sem teleporte, sem troca de zona: o grupo simplesmente dirige a caravana pela
+-- estrada até a faixa de chegada do próximo POI. Retorna o id do POI alcançado (nil = derrota).
+local function driveToNextPOI(currentId)
+	RS:SetAttribute("Phase", "Travessia")
 	RS:SetAttribute("PhaseTimeLeft", 0)
-	applyDayAmbience()
-	transitionClock(0, 10, 5)
-
-	-- abre caminho: estruturas plantadas na estrada são desmontadas antes da caravana passar
+	-- abre caminho: estruturas plantadas na estrada do POI atual são desmontadas
+	local cx = (CurrentZone.center and CurrentZone.center.X) or 0
 	for _, s in ipairs(structuresFolder:GetChildren()) do
 		local pp = s.PrimaryPart
-		if pp and math.abs(pp.Position.X) < 8 then
+		if pp and math.abs(pp.Position.X - cx) < 8 then
 			s:Destroy()
 		end
 	end
-	announce("Amanheceu. Subam na caravana e dirijam até a passagem norte quando estiverem prontos!")
+	announce("Subam na caravana e dirijam pro próximo ponto. A estrada é de mão única.")
 	ZoneBuilder.setCaravanaLocked(false)
-	-- raio largo: ao norte do funil o território é aberto e o motorista pode cruzar fora do eixo
-	if not waitCaravanaNear(CurrentZone.exitCf.Position, 40) then
-		return
-	end
-	ZoneBuilder.setCaravanaLocked(true)
-
-	-- Etapa 2: corredor de travessia (zona isolada até o passo 3); o grupo dirige até o fim
-	ZoneBuilder.unseatAll()
-	local trans = swapZone(ZoneBuilder.buildTransition)
-	ZoneBuilder.pivotCaravanaTo(trans.startCf)
-	teleportPlayersBehindCaravana()
-	zoneFadeRE:FireAllClients(false)
-	RS:SetAttribute("NodeName", "A Caminho...")
-	RS:SetAttribute("Phase", "Travessia")
-	announce("Zona de travessia — dirijam até o outro lado (dá pra parar e coletar no caminho).")
-	ZoneBuilder.setCaravanaLocked(false)
-	if not waitCaravanaNear(trans.endCf.Position, CARAVAN_ARRIVE_RADIUS) then
-		return
-	end
-	ZoneBuilder.setCaravanaLocked(true)
-
-	-- Etapa 3: próximo POI; o grupo leva a caravana até o acampamento.
-	-- Revisão de gameplay (2026-07): a chegada abre um DIA de preparação antes da noite
-	-- (o doc 4.5 original mandava a noite cair na chegada; decisão do jogo mudou isso).
-	ZoneBuilder.unseatAll()
-	swapZone(function()
-		return ZoneBuilder.buildPOI(node.kind)
-	end)
-	ZoneBuilder.pivotCaravanaTo(CurrentZone.entryCf)
-	teleportPlayersBehindCaravana()
-	zoneFadeRE:FireAllClients(false)
-	RS:SetAttribute("NodeName", node.label)
-	RS:SetAttribute("Phase", "Chegada")
-	announce("Chegando: " .. node.label .. ". Levem a caravana até o acampamento — o dia é de preparação.")
-	ZoneBuilder.setCaravanaLocked(false)
-	waitCaravanaNear(CurrentZone.campCf.Position, CARAVAN_ARRIVE_RADIUS)
-	ZoneBuilder.setCaravanaLocked(true)
+	return waitArrival(currentId)
 end
 
 -- ===== boss (passo 8): a ameaça sai do covil e vem pelo funil =====
@@ -1175,7 +1163,8 @@ local function bossPhase()
 	bossModel:SetAttribute("LastAttack", 0)
 	RS:SetAttribute("BossMaxHP", BOSS_HP)
 	RS:SetAttribute("BossHP", BOSS_HP)
-	bossModel:PivotTo(CFrame.new(0, 5, 142)) -- na boca do covil, atrás do funil
+	local covil = (CurrentZone and CurrentZone.covilPos) or Vector3.new(0, 5, 142)
+	bossModel:PivotTo(CFrame.new(covil)) -- na boca do covil, atrás do funil
 	bossModel.Parent = enemiesFolder
 	local hrp = bossModel.PrimaryPart
 	if hrp then
@@ -1292,13 +1281,19 @@ task.spawn(function()
 		announce("A expedição parte!")
 		task.wait(1.5)
 
-		-- SETUP DA RUN (caravana e upgrades dela são ativo local da run, doc 5.3)
+		-- SETUP DA RUN: o mundo contínuo inteiro é montado de uma vez (doc 4.6); StreamingEnabled
+		-- carrega/descarrega geometria por proximidade. O fade aqui cobre SÓ a fronteira lobby->run
+		-- (placeholder do TeleportService entre places, doc 4.2), não uma troca de zona interna.
 		local graph = RouteGraph.generate()
-		local node = graph.nodes[graph.currentId]
 		ZoneBuilder.unseatAll()
 		zoneFadeRE:FireAllClients(true)
 		task.wait(0.7)
-		CurrentZone = ZoneBuilder.buildPOI(node.kind)
+		RunWorld = ZoneBuilder.buildWorld(graph)
+		local currentId = graph.currentId
+		local node = graph.nodes[currentId]
+		CurrentZone = RunWorld.zones[currentId]
+		ZoneBuilder.setCaravanaLocked(true)
+		ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
 		ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
 		teleportPlayersBehindCaravana()
 		zoneFadeRE:FireAllClients(false)
@@ -1314,7 +1309,7 @@ task.spawn(function()
 			if runState.defeated then break end
 			nightPhase((POI_DIFFICULTY[node.kind] or 0) + stays)
 			if runState.defeated then break end
-			local decision = runVote(node, graph)
+			local decision = runVote()
 			if runState.defeated then break end
 			if decision == "stay" then
 				stays += 1
@@ -1322,11 +1317,17 @@ task.spawn(function()
 				announce("O grupo decidiu ficar. A próxima noite aqui será mais difícil (+" .. stays .. " por permanência).")
 			else
 				stays = 0
-				node = graph.nodes[decision]
-				graph.currentId = decision
-				travelTo(node)
-				if runState.defeated then break end
+				-- o grupo DIRIGE até o próximo POI; waitArrival detecta fisicamente onde chegaram
+				local arrivedId = driveToNextPOI(currentId)
+				if not arrivedId then break end -- derrota durante a viagem
+				currentId = arrivedId
+				CurrentZone = RunWorld.zones[currentId]
+				node = graph.nodes[currentId]
+				ZoneBuilder.setCaravanaLocked(true)
+				ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
+				RS:SetAttribute("NodeName", node.label)
 				-- revisão de gameplay: a chegada abre um dia de preparação antes da noite
+				announce("Chegando: " .. node.label .. ". O dia é de preparação antes da noite.")
 				if node.kind == "boss" then
 					fullDay(true) -- dia de preparação também no Covil, antes do boss
 					if runState.defeated then break end
