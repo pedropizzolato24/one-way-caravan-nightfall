@@ -138,12 +138,11 @@ atmosphere.Haze = 1.6
 -- ===== mundo contínuo por streaming (doc 4.5/4.6/4.9: StreamingEnabled ligado) =====
 -- Um único espaço por run; o cliente carrega/descarrega geometria por distância do jogador,
 -- sem loading screen nem teleporte entre POIs. Radii enxutos p/ mobile/Chromebook (doc 4.9).
-workspace.StreamingEnabled = true
-workspace.StreamingMinRadius = 256 -- sempre carregado ao redor do jogador
-workspace.StreamingTargetRadius = 640 -- alvo de carregamento por distância
-pcall(function()
-	workspace.StreamingIntegrityMode = Enum.StreamingIntegrityMode.MinimumRadiusPause
-end)
+-- IMPORTANTE: StreamingEnabled/StreamingMinRadius/StreamingTargetRadius são propriedades com
+-- capability "Plugin" — um Script normal NÃO tem permissão pra escrevê-las em runtime ("The
+-- current thread cannot write ... lacking capability Plugin"), só um Plugin ou a sincronização
+-- de projeto (Rojo/Studio). Por isso elas são declaradas no default.project.json (Workspace
+-- $properties), aplicadas quando o Rojo sincroniza — não tente setá-las daqui.
 
 local function announce(text)
 	announceRE:FireAllClients(text)

@@ -9,8 +9,10 @@
 --   require(game.ServerScriptService.ZoneBuilder).preview()          -- estação
 --   require(game.ServerScriptService.ZoneBuilder).preview("mina")    -- ou outro tipo
 
--- mundo contínuo por streaming (doc 4.5/4.6): o servidor também liga isso em runtime, mas deixar
--- ligado no place evita um primeiro frame sem streaming
+-- mundo contínuo por streaming (doc 4.5/4.6): já é declarado no default.project.json e aplicado
+-- pelo Rojo ao sincronizar; rodar aqui também é redundante mas inofensivo (Command Bar tem
+-- capability de Plugin, diferente de um Script normal em ServerScriptService — não mova isso
+-- pro servidor, ele não tem permissão de escrever essa propriedade em runtime).
 workspace.StreamingEnabled = true
 
 -- limpeza de builds antigos (inclui "Mundo", o novo container contínuo)
