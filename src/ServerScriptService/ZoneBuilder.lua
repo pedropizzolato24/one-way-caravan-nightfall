@@ -1,9 +1,9 @@
--- ZoneBuilder — constrói zonas em RUNTIME: terreno, props, recursos, spawns, caravana e movimento dela.
--- Doc 4.5/4.6: zonas isoladas node-based, pré-autoradas como "receitas" sobre uma base comum;
--- o passo 7 sequencia várias zonas por run, então o mapa não pode mais ser um build único de Command Bar.
+-- ZoneBuilder — constrói zonas em RUNTIME: terreno, props, recursos, spawns, a caravana e o rig dela.
+-- Doc 4.5 (Revisão 3): a caravana é um VEÍCULO pilotado por jogador (VehicleSeat), não mais NPC-driven.
 -- Layout comum de POI: estrada sul->norte, acampamento ao sul (a caravana para nele), canyon-funil em
 -- z=30 com passagem única de 10 studs, território da ameaça (spawns) ao norte, montanhas fechando tudo.
-local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local PhysicsService = game:GetService("PhysicsService")
 
 local ZoneBuilder = {}
 
@@ -431,12 +431,73 @@ function ZoneBuilder.buildLobby()
 	}
 end
 
--- ===== caravana (doc 4.5): Root ancorado + partes soldadas; mover o Root move o conjunto =====
+-- ===== caravana (doc 4.5 rev.3): veículo de verdade, pilotado por jogador =====
+-- Rig na técnica do Dead Rails (DevForum "Train Move System [Dead Rails]"): um assembly único
+-- soldado num Root central via WeldConstraint, rodas em HingeConstraint, VehicleSeat comandando
+-- throttle/steer, e Seats comuns de passageiro — o weld nativo do assento é o que elimina o
+-- jitter de quem não está dirigindo.
+-- DESVIO DOCUMENTADO do doc 4.5: lá o empuxo é "PrismaticConstraint ActuatorType Motor", que no
+-- Dead Rails empurra contra um TRILHO reto ancorado (o trem não esterça). Com pilotagem livre
+-- (exigida pelo mesmo doc), um prismatic interno ao assembly não gera força líquida; o empuxo
+-- correto vira Motor nos HingeConstraints das rodas traseiras (padrão nativo de veículo por
+-- constraints do Roblox). Todo o resto da técnica é mantido como especificado.
+local CARAVAN_MAX_SPEED = 24 -- studs/s no chão plano [placeholder de playtest]
+local REAR_WHEEL_RADIUS = 2.4
+local STEER_ANGLE = 28 -- graus de esterço máximo [placeholder de playtest]
+local DRIVE_TORQUE = 400000 -- por roda motriz [placeholder de playtest]
+local STEER_TORQUE = 1e7
+
+-- grupos de colisão: chassi e rodas não colidem entre si (o eixo visual passa dentro da roda);
+-- ambos colidem com o mundo. "GuardrailCaravana" (passo 2) segura só a caravana, não jogadores.
+local function ensureCollisionGroups()
+	for _, g in ipairs({ "Caravana", "CaravanaRodas" }) do
+		pcall(function()
+			PhysicsService:RegisterCollisionGroup(g)
+		end)
+	end
+	PhysicsService:CollisionGroupSetCollidable("Caravana", "CaravanaRodas", false)
+end
+
+-- referências vivas do rig (preenchidas por buildCaravana)
+local rig = { locked = true, seat = nil, root = nil, motors = {}, servos = {}, seats = {} }
+
+-- aplica throttle/steer do VehicleSeat nos motores; zera tudo quando travada ou sem motorista
+local function refreshDrive()
+	if not (rig.seat and rig.root) then
+		return
+	end
+	local driving = not rig.locked and rig.seat.Occupant ~= nil
+	local throttle = driving and rig.seat.ThrottleFloat or 0
+	for _, motor in ipairs(rig.motors) do
+		-- ω = v/r; sinal validado com o rig construído olhando +Z (frente = bois)
+		motor.AngularVelocity = throttle * CARAVAN_MAX_SPEED / REAR_WHEEL_RADIUS
+	end
+	local steer = driving and rig.seat.SteerFloat or 0
+	for _, servo in ipairs(rig.servos) do
+		-- assento olha +Z (girado 180°), então "direita" do motorista é -X: inverte o sinal
+		servo.TargetAngle = -steer * STEER_ANGLE
+	end
+end
+
+-- física da caravana: motorista sentado ganha network ownership (input responsivo);
+-- vazia ou travada, volta pro servidor (mesmo modelo do trem do Dead Rails p/ passageiros)
+local function refreshOwnership()
+	if not (rig.root and rig.root.Parent) or rig.root.Anchored then
+		return
+	end
+	local occ = rig.seat and rig.seat.Occupant
+	local plr = occ and Players:GetPlayerFromCharacter(occ.Parent) or nil
+	pcall(function()
+		rig.root:SetNetworkOwner(plr)
+	end)
+end
+
 function ZoneBuilder.buildCaravana()
 	local existing = workspace:FindFirstChild("Caravana")
 	if existing then
 		return existing
 	end
+	ensureCollisionGroups()
 
 	local m = Instance.new("Model")
 	m.Name = "Caravana"
@@ -447,9 +508,14 @@ function ZoneBuilder.buildCaravana()
 	root.CFrame = CFrame.new(0, CARAVAN_Y, 0) -- construída na origem olhando +Z; PivotTo posiciona depois
 	root.Transparency = 1
 	root.CanCollide = false
-	root.Anchored = true
+	root.Anchored = true -- nasce travada (lobby); setCaravanaLocked libera
+	root.CollisionGroup = "Caravana"
+	root.CustomPhysicalProperties = PhysicalProperties.new(0.35, 0.3, 0)
 	root.Parent = m
 	m.PrimaryPart = root
+	rig.root = root
+	rig.locked = true
+	rig.motors, rig.servos, rig.seats = {}, {}, {}
 
 	local function cpart(name, size, cf, color, material, opts)
 		local p = Instance.new("Part")
@@ -460,6 +526,7 @@ function ZoneBuilder.buildCaravana()
 		p.Material = material or Enum.Material.Wood
 		p.Anchored = false
 		p.CanCollide = true
+		p.CollisionGroup = "Caravana"
 		if opts then
 			for k, v in pairs(opts) do p[k] = v end
 		end
@@ -476,27 +543,140 @@ function ZoneBuilder.buildCaravana()
 	local madeiraEscura = Color3.fromRGB(86, 62, 40)
 	local lona = Color3.fromRGB(233, 225, 205)
 
-	-- chassi
+	-- chassi (eixos mais curtos que a bitola: a ponta não pode penetrar a roda física)
 	cpart("Cama", Vector3.new(6, 0.8, 14), CFrame.new(0, 3.2, -1), madeira)
 	cpart("LateralOeste", Vector3.new(0.6, 2.4, 14), CFrame.new(-3.3, 4.6, -1), madeiraClara, Enum.Material.WoodPlanks)
 	cpart("LateralLeste", Vector3.new(0.6, 2.4, 14), CFrame.new(3.3, 4.6, -1), madeiraClara, Enum.Material.WoodPlanks)
 	cpart("PainelFrente", Vector3.new(7.2, 2.4, 0.6), CFrame.new(0, 4.6, 6), madeiraClara, Enum.Material.WoodPlanks)
 	cpart("PainelTras", Vector3.new(7.2, 2.4, 0.6), CFrame.new(0, 4.6, -8), madeiraClara, Enum.Material.WoodPlanks)
 	cpart("Viga", Vector3.new(0.8, 0.6, 13), CFrame.new(0, 2.5, -0.5), madeiraEscura)
-	cpart("EixoTras", Vector3.new(8, 0.5, 0.5), CFrame.new(0, 2.4, -4.5), madeiraEscura)
-	cpart("EixoFrente", Vector3.new(7.4, 0.5, 0.5), CFrame.new(0, 1.9, 3.5), madeiraEscura)
+	cpart("EixoTras", Vector3.new(6.2, 0.5, 0.5), CFrame.new(0, 2.4, -4.5), madeiraEscura)
+	cpart("EixoFrente", Vector3.new(6.2, 0.5, 0.5), CFrame.new(0, 1.9, 3.5), madeiraEscura)
 
-	-- rodas (traseiras maiores)
-	for _, r in ipairs({ { -3.9, 2.4, -4.5, 4.8 }, { 3.9, 2.4, -4.5, 4.8 }, { -3.8, 1.9, 3.5, 3.8 }, { 3.8, 1.9, 3.5, 3.8 } }) do
-		cpart("Roda", Vector3.new(0.7, r[4], r[4]), CFrame.new(r[1], r[2], r[3]), Color3.fromRGB(74, 52, 34),
-			Enum.Material.Wood, { Shape = Enum.PartType.Cylinder })
-		cpart("Cubo", Vector3.new(1.0, 1.1, 1.1), CFrame.new(r[1] + (r[1] > 0 and 0.2 or -0.2), r[2], r[3]),
-			madeiraEscura, Enum.Material.Wood, { Shape = Enum.PartType.Cylinder, CanCollide = false })
+	-- rodas físicas: cilindro (eixo do cilindro = X = bitola) preso por HingeConstraint.
+	-- Traseiras: hinge direto no Root com ActuatorType Motor (tração).
+	-- Dianteiras: manga de eixo (knuckle) presa ao Root por hinge-servo vertical (esterço),
+	-- e a roda gira livre num hinge preso à manga.
+	local function mkWheel(x, y, z, dia, powered)
+		local wheel = Instance.new("Part")
+		wheel.Name = powered and "RodaTras" or "RodaFrente"
+		wheel.Shape = Enum.PartType.Cylinder
+		wheel.Size = Vector3.new(0.7, dia, dia)
+		wheel.CFrame = CFrame.new(x, y, z)
+		wheel.Color = Color3.fromRGB(74, 52, 34)
+		wheel.Material = Enum.Material.Wood
+		wheel.Anchored = false
+		wheel.CanCollide = true
+		wheel.CollisionGroup = "CaravanaRodas"
+		wheel.CustomPhysicalProperties = PhysicalProperties.new(1, 2, 0) -- denso e com atrito: é a tração
+		wheel.Parent = m
+		local wheelAtt = Instance.new("Attachment") -- eixo X do attachment = eixo do hinge = bitola
+		wheelAtt.Parent = wheel
+
+		local hub -- parte onde o hinge da roda ancora: Root (trás) ou manga de eixo (frente)
+		if powered then
+			hub = root
+		else
+			hub = Instance.new("Part")
+			hub.Name = "MangaEixo"
+			hub.Size = Vector3.new(0.8, 0.8, 0.8)
+			hub.CFrame = CFrame.new(x, y, z)
+			hub.Transparency = 1
+			hub.CanCollide = false
+			hub.CollisionGroup = "CaravanaRodas"
+			hub.Parent = m
+			-- servo de esterço: eixo vertical (Orientation (0,0,90) aponta o X do attachment pra cima)
+			local steerAtt0 = Instance.new("Attachment")
+			steerAtt0.Position = root.CFrame:PointToObjectSpace(Vector3.new(x, y, z))
+			steerAtt0.Orientation = Vector3.new(0, 0, 90)
+			steerAtt0.Parent = root
+			local steerAtt1 = Instance.new("Attachment")
+			steerAtt1.Orientation = Vector3.new(0, 0, 90)
+			steerAtt1.Parent = hub
+			local servo = Instance.new("HingeConstraint")
+			servo.Name = "ServoEsterco"
+			servo.Attachment0 = steerAtt0
+			servo.Attachment1 = steerAtt1
+			servo.ActuatorType = Enum.ActuatorType.Servo
+			servo.ServoMaxTorque = STEER_TORQUE
+			servo.AngularSpeed = 4
+			servo.LimitsEnabled = true
+			servo.LowerAngle = -STEER_ANGLE
+			servo.UpperAngle = STEER_ANGLE
+			servo.Parent = hub
+			table.insert(rig.servos, servo)
+		end
+
+		local hubAtt = Instance.new("Attachment")
+		hubAtt.Position = hub.CFrame:PointToObjectSpace(Vector3.new(x, y, z))
+		hubAtt.Parent = hub
+		local hinge = Instance.new("HingeConstraint")
+		hinge.Name = powered and "MotorTracao" or "HingeRoda"
+		hinge.Attachment0 = hubAtt
+		hinge.Attachment1 = wheelAtt
+		hinge.Parent = wheel
+		if powered then
+			hinge.ActuatorType = Enum.ActuatorType.Motor
+			hinge.MotorMaxTorque = DRIVE_TORQUE
+			hinge.MotorMaxAcceleration = 40
+			hinge.AngularVelocity = 0
+			table.insert(rig.motors, hinge)
+		end
+		return wheel
 	end
+	mkWheel(-3.9, 2.4, -4.5, 4.8, true)
+	mkWheel(3.9, 2.4, -4.5, 4.8, true)
+	mkWheel(-3.8, 1.9, 3.5, 3.8, false)
+	mkWheel(3.8, 1.9, 3.5, 3.8, false)
 
-	-- boleia
-	cpart("Banco", Vector3.new(5.6, 0.5, 1.8), CFrame.new(0, 5.6, 5.6), madeira)
-	cpart("Encosto", Vector3.new(5.6, 1.4, 0.4), CFrame.new(0, 6.4, 6.5), madeira)
+	-- boleia: VehicleSeat (condução) + Seat de passageiro no mesmo banco.
+	-- Girados 180° pro LookVector apontar +Z (frente do rig = bois); sem isso o motorista olha pra trás.
+	local vseat = Instance.new("VehicleSeat")
+	vseat.Name = "Boleia"
+	vseat.Size = Vector3.new(2.6, 0.5, 1.8)
+	vseat.CFrame = CFrame.new(1.4, 5.6, 5.6) * CFrame.Angles(0, math.pi, 0)
+	vseat.Color = madeira
+	vseat.Material = Enum.Material.Wood
+	vseat.Anchored = false
+	vseat.CanCollide = true
+	vseat.CollisionGroup = "Caravana"
+	vseat.MaxSpeed = 0 -- motores legados desligados; quem dirige são os hinges via script
+	vseat.Torque = 0
+	vseat.TurnSpeed = 0
+	vseat.HeadsUpDisplay = false
+	local vw = Instance.new("WeldConstraint")
+	vw.Part0 = root
+	vw.Part1 = vseat
+	vw.Parent = vseat
+	vseat.Parent = m
+	rig.seat = vseat
+	table.insert(rig.seats, vseat)
+
+	local function mkSeat(name, cf)
+		local s = Instance.new("Seat")
+		s.Name = name
+		s.Size = Vector3.new(2.4, 0.5, 1.8)
+		s.CFrame = cf
+		s.Color = madeira
+		s.Material = Enum.Material.Wood
+		s.Anchored = false
+		s.CanCollide = true
+		s.CollisionGroup = "Caravana"
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = root
+		w.Part1 = s
+		w.Parent = s
+		s.Parent = m
+		table.insert(rig.seats, s)
+		return s
+	end
+	mkSeat("PassageiroBoleia", CFrame.new(-1.4, 5.6, 5.6) * CFrame.Angles(0, math.pi, 0))
+	-- passageiros da cama olham pro centro (4 assentos no total = lotação do MVP, doc 4.3)
+	mkSeat("PassageiroOeste", CFrame.lookAt(Vector3.new(-2.1, 4.0, -2.6), Vector3.new(2.1, 4.0, -2.6)))
+	mkSeat("PassageiroLeste", CFrame.lookAt(Vector3.new(2.1, 4.0, -2.6), Vector3.new(-2.1, 4.0, -2.6)))
+
+	-- encosto ATRÁS do banco (motorista olha +Z, pros bois); estribo na frente é o apoio dos pés
+	cpart("Encosto", Vector3.new(5.6, 1.4, 0.4), CFrame.new(0, 6.4, 4.7), madeira)
 	cpart("Estribo", Vector3.new(5.6, 1.6, 0.4), CFrame.new(0, 4.6, 7.1) * CFrame.Angles(math.rad(-20), 0, 0), madeiraEscura)
 
 	-- lona em arco
@@ -516,9 +696,9 @@ function ZoneBuilder.buildCaravana()
 		Color3.fromRGB(105, 75, 45), Enum.Material.Wood, { Shape = Enum.PartType.Cylinder, CanCollide = false })
 	cpart("Barril2", Vector3.new(2.0, 1.7, 1.7), CFrame.new(1.5, 4.6, -6) * CFrame.Angles(0, 0, math.rad(90)),
 		Color3.fromRGB(105, 75, 45), Enum.Material.Wood, { Shape = Enum.PartType.Cylinder, CanCollide = false })
-	cpart("Caixote", Vector3.new(2, 2, 2), CFrame.new(1.3, 4.6, -3.2), Color3.fromRGB(128, 98, 60),
+	cpart("Caixote", Vector3.new(2, 2, 2), CFrame.new(0, 4.6, -4.6), Color3.fromRGB(128, 98, 60),
 		Enum.Material.WoodPlanks, { CanCollide = false })
-	cpart("Saco1", Vector3.new(1.7, 1.2, 1.7), CFrame.new(-1.4, 4.2, -3.4), Color3.fromRGB(196, 172, 128),
+	cpart("Saco1", Vector3.new(1.7, 1.2, 1.7), CFrame.new(-1.6, 4.2, -4.8), Color3.fromRGB(196, 172, 128),
 		Enum.Material.Fabric, { Shape = Enum.PartType.Ball, CanCollide = false })
 	cpart("Saco2", Vector3.new(1.7, 1.2, 1.7), CFrame.new(0.3, 4.15, -1.6), Color3.fromRGB(196, 172, 128),
 		Enum.Material.Fabric, { Shape = Enum.PartType.Ball, CanCollide = false })
@@ -534,9 +714,9 @@ function ZoneBuilder.buildCaravana()
 	light.Brightness = 1.4
 	light.Parent = lamp
 
-	-- lança + canga + junta de bois
-	cpart("Lanca", Vector3.new(0.5, 0.4, 5.6), CFrame.new(0, 1.7, 8.6), madeiraEscura)
-	cpart("Canga", Vector3.new(6.2, 0.5, 0.5), CFrame.new(0, 2.6, 11.2), madeiraEscura)
+	-- lança + canga + junta de bois (baixas: sem colisão pra não raspar em elevação do terreno)
+	cpart("Lanca", Vector3.new(0.5, 0.4, 5.6), CFrame.new(0, 1.7, 8.6), madeiraEscura, nil, { CanCollide = false })
+	cpart("Canga", Vector3.new(6.2, 0.5, 0.5), CFrame.new(0, 2.6, 11.2), madeiraEscura, nil, { CanCollide = false })
 
 	local function boi(x, tom)
 		cpart("BoiCorpo", Vector3.new(2.4, 2.7, 4.6), CFrame.new(x, 2.75, 12.6), tom, Enum.Material.SmoothPlastic)
@@ -559,26 +739,58 @@ function ZoneBuilder.buildCaravana()
 	boi(2.1, Color3.fromRGB(134, 100, 72))
 
 	m:SetAttribute("IsCaravana", true)
+
+	-- input do VehicleSeat -> motores/servos; troca de motorista atualiza network ownership
+	vseat:GetPropertyChangedSignal("ThrottleFloat"):Connect(refreshDrive)
+	vseat:GetPropertyChangedSignal("SteerFloat"):Connect(refreshDrive)
+	vseat:GetPropertyChangedSignal("Occupant"):Connect(function()
+		refreshOwnership()
+		refreshDrive()
+	end)
+
 	m.Parent = workspace
+	refreshDrive()
 	return m
+end
+
+-- trava/destrava a caravana (noite, lobby, votação): Root ancorado = assembly inteiro parado.
+-- Destravar zera velocidades e devolve a física pro motorista atual (se houver).
+function ZoneBuilder.setCaravanaLocked(locked)
+	rig.locked = locked
+	local root = rig.root
+	if not (root and root.Parent) then
+		return
+	end
+	root.Anchored = locked
+	if not locked then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		refreshOwnership()
+	end
+	refreshDrive()
+end
+
+-- tira todo mundo dos assentos (necessário antes de pivôs longos de troca de zona/lobby)
+function ZoneBuilder.unseatAll()
+	for _, s in ipairs(rig.seats) do
+		local occ = s.Parent and s.Occupant
+		if occ then
+			occ.Sit = false
+		end
+	end
+	task.wait(0.1) -- deixa os SeatWelds morrerem antes do pivô
 end
 
 function ZoneBuilder.pivotCaravanaTo(cf)
 	local c = workspace:FindFirstChild("Caravana")
 	if c then
 		c:PivotTo(cf)
+		local root = c.PrimaryPart
+		if root and not root.Anchored then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
 	end
-end
-
--- move a caravana em linha reta a velocidade fixa (doc 4.5); retorna a duração em segundos
-function ZoneBuilder.tweenCaravanaTo(cf, speed)
-	local c = workspace:FindFirstChild("Caravana")
-	local root = c and c.PrimaryPart
-	if not root then return 0 end
-	local dist = (cf.Position - root.Position).Magnitude
-	local dur = math.max(dist / speed, 0.1)
-	TweenService:Create(root, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = cf }):Play()
-	return dur
 end
 
 -- preview no modo Edit (Command Bar, com Rojo conectado):

@@ -1,7 +1,8 @@
 -- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.8)
--- Toda autoridade de HP, recursos, spawn, dano, morte, rota, votação e economia vive AQUI.
+-- Toda autoridade de HP, recursos, spawn, dano, morte, rota e economia vive AQUI.
 -- Cliente só envia intenção via RemoteEvents validados e rate-limitados.
--- Passo 7: grafo de rota + zonas em runtime + travessia NPC-driven + votação (doc 4.5/4.6/5.4).
+-- Doc 4.5/5.4 (Revisão 3): a caravana é PILOTADA por um jogador (VehicleSeat); a travessia
+-- entre POIs é dirigida pelo grupo, não mais NPC-driven.
 -- Passo 8: boss no Covil, checkpoint, vitória/derrota (wipe) e moeda de run (doc 5.8).
 
 local Players = game:GetService("Players")
@@ -15,10 +16,10 @@ local ProfileManager = require(script.Parent.ProfileManager)
 
 -- ===== config =====
 local DAY_LENGTH = 90 -- dia completo (só quando o grupo vota ficar, ou no 1º nó)
-local MORNING_LENGTH = 40 -- etapa 1 do dia de viagem: manhã no POI atual antes da caravana partir
 local NIGHT_LENGTH = 120
 local VOTE_LENGTH = 20
-local CARAVAN_SPEED = 9 -- studs/s, fixa (doc 4.5)
+local CARAVAN_ARRIVE_RADIUS = 14 -- raio (studs) pra considerar a caravana "chegou" num waypoint
+local CARAVAN_SANITY_SPEED = 60 -- teto de velocidade horizontal da caravana (anti-exploit do motorista)
 local WAVES = { -- 3 ondas por noite, escalando em contagem
 	{ time = 6, count = 3 },
 	{ time = 45, count = 4 },
@@ -261,45 +262,85 @@ game:BindToClose(function()
 end)
 
 -- ===== anti speed/teleport básico (doc 4.1) =====
+local lastCaravanaPos = nil -- sanity-check da caravana: o motorista tem network ownership dela
 task.spawn(function()
 	while true do
 		task.wait(1)
 		for _, plr in ipairs(Players:GetPlayers()) do
 			local char = plr.Character
 			local hrp = char and char:FindFirstChild("HumanoidRootPart")
-			if hrp then
-				local rec = lastPos[plr]
-				local now = os.clock()
-				if rec and rec.char == char then
-					local dt = math.max(now - rec.t, 0.1)
-					local flat = Vector3.new(hrp.Position.X - rec.pos.X, 0, hrp.Position.Z - rec.pos.Z)
-					if flat.Magnitude / dt > MAX_HORIZ_SPEED then
-						char:PivotTo(CFrame.new(rec.pos + Vector3.new(0, 2, 0)))
-						print("[One Way Caravan: Nightfall] Movimento suspeito de " .. plr.Name .. " — posição revertida")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hrp and hum then
+				if hum.SeatPart then
+					lastPos[plr] = nil -- sentado (a caravana pode ser mais rápida que o teto a pé)
+				else
+					local rec = lastPos[plr]
+					local now = os.clock()
+					if rec and rec.char == char then
+						local dt = math.max(now - rec.t, 0.1)
+						local flat = Vector3.new(hrp.Position.X - rec.pos.X, 0, hrp.Position.Z - rec.pos.Z)
+						if flat.Magnitude / dt > MAX_HORIZ_SPEED then
+							char:PivotTo(CFrame.new(rec.pos + Vector3.new(0, 2, 0)))
+							print("[One Way Caravan: Nightfall] Movimento suspeito de " .. plr.Name .. " — posição revertida")
+						else
+							lastPos[plr] = { char = char, pos = hrp.Position, t = now }
+						end
 					else
 						lastPos[plr] = { char = char, pos = hrp.Position, t = now }
 					end
-				else
-					lastPos[plr] = { char = char, pos = hrp.Position, t = now }
 				end
+			end
+		end
+		-- caravana: motorista é dono da física dela; reverte salto impossível (anti speed/teleport)
+		local caravana = workspace:FindFirstChild("Caravana")
+		local root = caravana and caravana.PrimaryPart
+		if root then
+			local now = os.clock()
+			if lastCaravanaPos and not root.Anchored then
+				local dt = math.max(now - lastCaravanaPos.t, 0.1)
+				local flat = Vector3.new(root.Position.X - lastCaravanaPos.pos.X, 0, root.Position.Z - lastCaravanaPos.pos.Z)
+				if flat.Magnitude / dt > CARAVAN_SANITY_SPEED then
+					caravana:PivotTo(CFrame.new(lastCaravanaPos.pos) * (root.CFrame - root.CFrame.Position))
+					root.AssemblyLinearVelocity = Vector3.zero
+					print("[One Way Caravan: Nightfall] Movimento suspeito da caravana — posição revertida")
+					lastCaravanaPos = { pos = root.Position, t = now }
+				else
+					lastCaravanaPos = { pos = root.Position, t = now }
+				end
+			else
+				lastCaravanaPos = { pos = root.Position, t = now }
 			end
 		end
 	end
 end)
 
--- teleporte legítimo do servidor (trocas de zona): reseta o rastreio anti-teleport junto
+-- teleporte legítimo do servidor (trocas de zona): reseta o rastreio anti-teleport junto.
+-- Jogadores sentados na caravana são pulados (o pivô da caravana já os leva junto pelo SeatWeld).
 local function teleportPlayersBehindCaravana()
 	local caravana = workspace:FindFirstChild("Caravana")
 	local base = caravana and caravana:GetPivot() or CFrame.new(CAMP_FALLBACK)
 	local i = 0
 	for _, plr in ipairs(Players:GetPlayers()) do
 		local char = plr.Character
-		if char then
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if char and not (hum and hum.SeatPart) then
 			char:PivotTo(base * CFrame.new(-6 + (i % 4) * 4, 1.5, -12 - math.floor(i / 4) * 4))
 			lastPos[plr] = nil
 			i += 1
 		end
 	end
+end
+
+-- espera a caravana (dirigida pelos jogadores) chegar perto de um ponto; falso se a run acabou antes
+local function waitCaravanaNear(pos, radius)
+	while not runState.defeated do
+		local p = campPos()
+		if (Vector3.new(p.X, 0, p.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude <= radius then
+			return true
+		end
+		task.wait(0.3)
+	end
+	return false
 end
 
 -- ===== pool de inimigos (doc 4.7: object pooling obrigatório, nunca Instantiate/Destroy por onda) =====
@@ -1056,7 +1097,9 @@ local function runVote(node, graph)
 	return decision
 end
 
--- ===== travessia NPC-driven em 3 etapas (doc 4.5) =====
+-- ===== travessia dirigida pelo grupo (doc 4.5 rev.3: caravana pilotada, não NPC-driven) =====
+-- As zonas ainda são isoladas com fade+pivô entre elas (o passo 3 remove isso); dentro de cada
+-- trecho, quem move a caravana é o motorista no VehicleSeat.
 local function swapZone(buildFn)
 	zoneFadeRE:FireAllClients(true)
 	task.wait(0.7)
@@ -1066,12 +1109,11 @@ local function swapZone(buildFn)
 end
 
 local function travelTo(node)
-	-- Etapa 1: manhã no POI atual; a caravana "acorda" e sai sozinha
-	RS:SetAttribute("Phase", "Manhã")
+	-- Etapa 1: amanhece; o grupo embarca e dirige até a saída norte quando quiser
+	RS:SetAttribute("Phase", "Partida")
+	RS:SetAttribute("PhaseTimeLeft", 0)
 	applyDayAmbience()
 	transitionClock(0, 10, 5)
-	announce("Amanheceu. A caravana parte em " .. MORNING_LENGTH .. "s — juntem o que puderem!")
-	phaseCountdown(MORNING_LENGTH)
 
 	-- abre caminho: estruturas plantadas na estrada são desmontadas antes da caravana passar
 	for _, s in ipairs(structuresFolder:GetChildren()) do
@@ -1080,25 +1122,33 @@ local function travelTo(node)
 			s:Destroy()
 		end
 	end
-	announce("A caravana está partindo! Sigam-na pela passagem norte.")
-	RS:SetAttribute("Phase", "Partida")
-	phaseCountdown(ZoneBuilder.tweenCaravanaTo(CurrentZone.exitCf, CARAVAN_SPEED))
-	task.wait(0.5)
+	announce("Amanheceu. Subam na caravana e dirijam até a passagem norte quando estiverem prontos!")
+	ZoneBuilder.setCaravanaLocked(false)
+	-- raio largo: ao norte do funil o território é aberto e o motorista pode cruzar fora do eixo
+	if not waitCaravanaNear(CurrentZone.exitCf.Position, 40) then
+		return
+	end
+	ZoneBuilder.setCaravanaLocked(true)
 
-	-- Etapa 2: zona de transição (corredor isolado; caravana em linha reta, jogadores ao redor)
+	-- Etapa 2: corredor de travessia (zona isolada até o passo 3); o grupo dirige até o fim
+	ZoneBuilder.unseatAll()
 	local trans = swapZone(ZoneBuilder.buildTransition)
 	ZoneBuilder.pivotCaravanaTo(trans.startCf)
 	teleportPlayersBehindCaravana()
 	zoneFadeRE:FireAllClients(false)
 	RS:SetAttribute("NodeName", "A Caminho...")
 	RS:SetAttribute("Phase", "Travessia")
-	announce("Zona de travessia — acompanhem a caravana até o outro lado.")
-	phaseCountdown(ZoneBuilder.tweenCaravanaTo(trans.endCf, CARAVAN_SPEED))
-	task.wait(0.5)
+	announce("Zona de travessia — dirijam até o outro lado (dá pra parar e coletar no caminho).")
+	ZoneBuilder.setCaravanaLocked(false)
+	if not waitCaravanaNear(trans.endCf.Position, CARAVAN_ARRIVE_RADIUS) then
+		return
+	end
+	ZoneBuilder.setCaravanaLocked(true)
 
-	-- Etapa 3: próximo POI; caravana anda até o acampamento.
+	-- Etapa 3: próximo POI; o grupo leva a caravana até o acampamento.
 	-- Revisão de gameplay (2026-07): a chegada abre um DIA de preparação antes da noite
 	-- (o doc 4.5 original mandava a noite cair na chegada; decisão do jogo mudou isso).
+	ZoneBuilder.unseatAll()
 	swapZone(function()
 		return ZoneBuilder.buildPOI(node.kind)
 	end)
@@ -1107,9 +1157,10 @@ local function travelTo(node)
 	zoneFadeRE:FireAllClients(false)
 	RS:SetAttribute("NodeName", node.label)
 	RS:SetAttribute("Phase", "Chegada")
-	announce("Chegando: " .. node.label .. ". Vocês terão o dia pra se preparar antes da noite.")
-	phaseCountdown(ZoneBuilder.tweenCaravanaTo(CurrentZone.campCf, CARAVAN_SPEED))
-	task.wait(0.5)
+	announce("Chegando: " .. node.label .. ". Levem a caravana até o acampamento — o dia é de preparação.")
+	ZoneBuilder.setCaravanaLocked(false)
+	waitCaravanaNear(CurrentZone.campCf.Position, CARAVAN_ARRIVE_RADIUS)
+	ZoneBuilder.setCaravanaLocked(true)
 end
 
 -- ===== boss (passo 8): a ameaça sai do covil e vem pelo funil =====
@@ -1203,6 +1254,8 @@ task.spawn(function()
 	ZoneBuilder.buildCaravana()
 	while true do
 		-- LOBBY: gastar moeda do perfil no catálogo e partir quando o grupo quiser
+		ZoneBuilder.setCaravanaLocked(true)
+		ZoneBuilder.unseatAll()
 		local lobby = ZoneBuilder.buildLobby()
 		CurrentZone = lobby
 		ZoneBuilder.pivotCaravanaTo(lobby.caravanaCf)
@@ -1242,6 +1295,7 @@ task.spawn(function()
 		-- SETUP DA RUN (caravana e upgrades dela são ativo local da run, doc 5.3)
 		local graph = RouteGraph.generate()
 		local node = graph.nodes[graph.currentId]
+		ZoneBuilder.unseatAll()
 		zoneFadeRE:FireAllClients(true)
 		task.wait(0.7)
 		CurrentZone = ZoneBuilder.buildPOI(node.kind)
