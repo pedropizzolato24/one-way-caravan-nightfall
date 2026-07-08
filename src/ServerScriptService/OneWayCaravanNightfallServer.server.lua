@@ -357,10 +357,33 @@ local function rectContains(r, p)
 	return p.X >= r.minX and p.X <= r.maxX and p.Z >= r.minZ and p.Z <= r.maxZ
 end
 
+-- ===== commit de fork (passo 4): a escolha do ramo é FÍSICA (doc 4.5/4.6) =====
+-- Ao cruzar o volume de trigger de um ramo (a caravana já entrou naquele braço), o servidor
+-- destrói o ramo não escolhido. Sem chão pra voltar, o "sem volta" se cumpre pela geometria.
+local function tryForkCommit()
+	if not RunWorld or RunWorld.forkCommitted or not RunWorld.commitRects then
+		return
+	end
+	local p = campPos()
+	for chosen, rect in pairs(RunWorld.commitRects) do
+		if rectContains(rect, p) then
+			local destroyed = ZoneBuilder.commitFork(chosen)
+			if destroyed then
+				local zone = RunWorld.zones[chosen]
+				local label = zone and zone.kind or chosen
+				announce("Rota travada rumo a " .. label .. ". O outro caminho desmoronou — sem volta.")
+				print("[One Way Caravan: Nightfall] Fork travado: " .. chosen .. " (ramo " .. destroyed .. " destruído)")
+			end
+			return
+		end
+	end
+end
+
 -- espera a caravana entrar na faixa de chegada de um POI diferente do atual (volume de trigger
--- checado por poll server-side); nil se a run acabou antes
+-- checado por poll server-side); nil se a run acabou antes. Checa o commit de fork no caminho.
 local function waitArrival(currentId)
 	while not runState.defeated do
+		tryForkCommit()
 		local p = campPos()
 		for id, zone in pairs(RunWorld.zones) do
 			if id ~= currentId and not ZoneBuilder.isGroupDestroyed(id) and rectContains(zone.arrivalRect, p) then

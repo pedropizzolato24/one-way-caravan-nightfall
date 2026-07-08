@@ -544,7 +544,7 @@ local MERGE_PLAZA = Vector3.new(0, 0, 1500)
 
 function ZoneBuilder.buildWorld(graph)
 	clearWorld()
-	world = { zones = {}, groups = {} }
+	world = { zones = {}, groups = {}, forkCommitted = false }
 
 	-- POIs (tipos vêm do grafo abstrato; posição é o slot fixo do layout)
 	buildPOI(graph.nodes.n1.kind, "n1", WORLD_CENTERS.n1, { south = false, north = true })
@@ -588,6 +588,27 @@ end
 
 function ZoneBuilder.getWorld()
 	return world
+end
+
+-- passo 4: trava a escolha do fork. Destrói a geometria do ramo NÃO escolhido (braço de ida/volta
+-- + o POI) e sela a abertura correspondente da plaza pra caravana não cair no vazio deixado pelo
+-- chão destruído. Retorna o id do ramo destruído, ou nil se o fork já foi travado.
+function ZoneBuilder.commitFork(chosenId)
+	if not world or world.forkCommitted then
+		return nil
+	end
+	world.forkCommitted = true
+	local other = chosenId == "n2a" and "n2b" or "n2a"
+	ZoneBuilder.destroyGroup("arm_" .. other)
+	ZoneBuilder.destroyGroup(other)
+	-- parede na abertura da plaza do lado destruído (só a caravana colide; jogadores atravessam)
+	local sign = other == "n2a" and -1 or 1
+	ZoneBuilder.sealGate(Vector3.new(sign * (PLAZA_HALF - 4), 0, FORK_PLAZA.Z), false)
+	return other
+end
+
+function ZoneBuilder.isForkCommitted()
+	return world ~= nil and world.forkCommitted == true
 end
 
 -- ===== lobby (passo 9): posto de partida com catálogo; zona pequena e segura, sem funil e sem inimigos =====
