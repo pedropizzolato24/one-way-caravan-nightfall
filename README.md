@@ -92,8 +92,10 @@ server-side validada com rate-limit, recursos repõem por amanhecer, fogueira/ba
 fantasma e orientação pelo jogador, comida cura, machado + inimigos com HP server-side e object
 pooling (24 instâncias), downed/revive hold-button, IA com desvio pelo funil, anti speed/teleport.
 
-Próximo passo (Seção 6): playtest no device alvo (Chromebook/mobile) pra fechar densidade de POI,
-cap de inimigos, taxas e ritmo (passo 10). Depois, Seção 3.2 (expansão: Carpinteiro primeiro).
+Próximos passos: **split multiplayer em 2 places** (Lobby + Run com teleporte de grupo, doc 4.2)
+— guia de implementação pronto em [docs/multiplayer-2-places.md](docs/multiplayer-2-places.md);
+e o playtest no device alvo (Chromebook/mobile) pra fechar densidade de POI, cap de inimigos,
+taxas e ritmo (passo 10). Depois, Seção 3.2 (expansão: Carpinteiro primeiro).
 
 ## Estrutura
 
@@ -149,10 +151,11 @@ Preview de um POI isolado no modo Edit (opcional, com Rojo conectado):
 
 - **Persistência no Studio** exige "Enable Studio Access to API Services" (Game Settings → Security)
   e place publicado; sem isso o `ProfileManager` roda em modo memória (avisa no Output).
-- **Split físico em 2 places** (lobby + run, TeleportService com reserved server, doc 4.2) pendente
-  de publish; o lobby hoje é uma zona no mesmo place, e a fronteira lobby↔run é a única transição de
-  tela (fade) que resta. `ProfileManager` caseiro — trocar por ProfileStore (loleris) depois
-  (interface já compatível).
+- **Split físico em 2 places** (lobby + run, TeleportService com reserved server, doc 4.2) pendente;
+  o lobby hoje é uma zona no mesmo place, e a fronteira lobby↔run é a única transição de tela (fade)
+  que resta. Guia de implementação passo a passo em
+  [docs/multiplayer-2-places.md](docs/multiplayer-2-places.md). `ProfileManager` caseiro — trocar
+  por ProfileStore (loleris) depois (interface já compatível).
 - **Latência de throttle da caravana**: a condução é responsiva pro esterço, mas os motores de
   tração são acionados no servidor a partir do `ThrottleFloat` replicado do motorista, então há ~1
   RTT de atraso na aceleração. Aceitável pra co-op PvE; revisar no playtest (passo 10) — mover o
