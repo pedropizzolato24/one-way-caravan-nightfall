@@ -5,14 +5,12 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 
 local plr = Players.LocalPlayer
 local remotes = RS:WaitForChild("Remotes")
 local collectRE = remotes:WaitForChild("CollectResource")
 local placeRE = remotes:WaitForChild("PlaceStructure")
 local eatRE = remotes:WaitForChild("EatFood")
-local zoneFadeRE = remotes:WaitForChild("ZoneFade")
 local announceRE = remotes:WaitForChild("Announce")
 local runEndedRE = remotes:WaitForChild("RunEnded")
 local buyRE = remotes:WaitForChild("BuyUnlock")
@@ -218,23 +216,8 @@ refreshBoss()
 -- Passo 6: a votação de avanço/permanência foi removida. A decisão é implícita pela posição
 -- física da caravana quando a noite volta (doc 5.4 rev.3) — não há mais UI de voto no cliente.
 
--- ===== fade da fronteira lobby<->run =====
-local fadeGui = Instance.new("ScreenGui")
-fadeGui.Name = "OneWayCaravanNightfallFade"
-fadeGui.ResetOnSpawn = false
-fadeGui.IgnoreGuiInset = true
-fadeGui.DisplayOrder = 50
-fadeGui.Parent = plr:WaitForChild("PlayerGui")
-local fadeFrame = Instance.new("Frame")
-fadeFrame.Size = UDim2.new(1, 0, 1, 0)
-fadeFrame.BackgroundColor3 = Color3.new(0, 0, 0)
-fadeFrame.BackgroundTransparency = 1
-fadeFrame.BorderSizePixel = 0
-fadeFrame.Parent = fadeGui
-
-zoneFadeRE.OnClientEvent:Connect(function(on)
-	TweenService:Create(fadeFrame, TweenInfo.new(on and 0.4 or 0.8), { BackgroundTransparency = on and 0 or 1 }):Play()
-end)
+-- (sem fade de zona: a fronteira lobby<->run agora é o teleporte entre places, doc 4.2 —
+-- a tela de loading nativa do TeleportService cobre a transição)
 
 announceRE.OnClientEvent:Connect(function(text)
 	msgLbl.Text = text

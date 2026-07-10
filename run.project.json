@@ -1,0 +1,32 @@
+{
+  "name": "one-way-caravan-nightfall-run",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "StreamingEnabled": true,
+        "StreamingMinRadius": 256,
+        "StreamingTargetRadius": 640
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "RunServer": {
+        "$path": "src/ServerScriptService/Run/RunServer.server.lua"
+      },
+      "Shared": {
+        "$path": "src/Shared"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "OneWayCaravanNightfallClient": {
+          "$path": "src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua"
+        }
+      }
+    }
+  }
+}

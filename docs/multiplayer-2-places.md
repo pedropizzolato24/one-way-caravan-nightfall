@@ -1,164 +1,99 @@
 # Multiplayer: split em 2 places (Lobby + Run) com teleporte de grupo
 
-Guia de implementação do doc 4.2: **Lobby Place** (hub de progressão/catálogo) + **Run Place**
+Implementação do doc 4.2: **Lobby Place** (hub de progressão/catálogo) + **Run Place**
 (instância de uma run), ligados por `TeleportService` com **reserved server** pro grupo cair
-junto no mesmo servidor. Escrito pra ser seguido sem contexto da sessão que o gerou — as âncoras
-de linha referem-se ao commit `162383a` da branch `claude/caravan-traversal-rebuild-fsfpx3`.
+junto no mesmo servidor.
 
-## Estado de partida
+## Status
 
-Hoje é tudo **um place e um script**: `OneWayCaravanNightfallServer.server.lua` alterna
-lobby ↔ run num `while true do` (o "loop lobby -> run", linha ~1264). O lobby é uma zona lógica
-(`ZoneBuilder.buildLobby()`), e a fronteira lobby↔run é um fade — placeholder exatamente do
-teleporte que este guia implementa.
+**O lado de código (mudanças 2–5) está IMPLEMENTADO** neste repositório. O que falta são as
+etapas que só dá pra fazer no Studio/Creator Dashboard (mudanças 1 e 6):
 
-## As 6 mudanças
+| # | Mudança | Status |
+|---|---------|--------|
+| 1 | Criar o place Run na Experience + preencher `Places.lua` | **PENDENTE (manual)** |
+| 2 | Módulos compartilhados em `src/Shared/` | Feito |
+| 3 | Split em `LobbyServer` / `RunServer` | Feito |
+| 4 | `ReserveServer` + `TeleportAsync` nas duas pontas | Feito |
+| 5 | Dois projetos Rojo (`lobby.project.json` / `run.project.json`) | Feito |
+| 6 | Publicar os dois places e testar ponta a ponta | **PENDENTE (manual)** |
 
-### 1. Criar o segundo Place na Experience
+Enquanto 1 e 6 não acontecem, **tudo continua testável**: com `Places.lua` zerado cada place
+roda em modo standalone — o Run começa uma run direto no Play e a reinicia no fim; o Lobby
+funciona inteiro e avisa que o teleporte não está configurado ao segurar o poste.
 
-No Creator Dashboard (ou Studio: **File → Publish As...** → adicionar como novo place na mesma
-Experience), crie o place **Run**. Anote os dois `PlaceId` — vão hardcoded num ModuleScript de
-config compartilhado (ex.: `src/Shared/Places.lua` retornando `{ LOBBY = ..., RUN = ... }`).
+## O que foi implementado (mapa do código)
+
+- **`src/Shared/`** — `ZoneBuilder`, `ProfileManager`, `RouteGraph` e `Places` (config de
+  PlaceIds), montados em `ServerScriptService.Shared` pelos dois projetos Rojo.
+- **`src/ServerScriptService/Lobby/LobbyServer.server.lua`** — catálogo (compra validada,
+  `Phase == "Lobby"`), caravana pilotável no posto murado, perfil (load/release/BindToClose) e
+  o poste "Iniciar expedição": `ReserveServer(Places.RUN)` → `TeleportOptions` com
+  `ReservedServerAccessCode` → `TeleportAsync` com a lista de jogadores capturada no momento do
+  teleporte. Falhou (Studio/sem config/erro transitório)? O poste continua armado pra nova
+  tentativa e o motivo é anunciado.
+- **`src/ServerScriptService/Run/RunServer.server.lua`** — toda a run (mundo contínuo, fases,
+  combate, boss, economia, anti-exploit). No boot monta o mundo ANTES de esperar jogadores
+  (quem chega do teleporte já spawna no SpawnLocation do primeiro POI); espera o grupo entrar
+  (janela de 120s + 2s de folga pra retardatários) e roda o percurso de POIs. No `endRun`,
+  credita a moeda, mostra a tela de fim e `TeleportAsync(Places.LOBBY, ...)` devolve o grupo;
+  quem ficar (teleporte indisponível) recomeça uma run nova no mesmo servidor.
+- **Cliente compartilhado** — o mesmo `OneWayCaravanNightfallClient` roda nos dois places (os
+  remotes existem nos dois; no Lobby só `BuyUnlock` tem handler). O fade de zona foi removido:
+  a transição lobby↔run agora é a tela de loading nativa do teleporte.
+- **Perfil entre places** — zero mudança no `ProfileManager`: o session-lock usa `game.JobId`
+  (único por servidor na plataforma toda) e `PlayerRemoving` dispara também no teleporte, então
+  o lock é solto e o perfil gravado na saída de cada place; o `load` do outro lado já tem retry
+  com backoff se a escrita demorar a propagar.
+
+## O que falta você fazer (mudanças 1 e 6)
+
+### 1. Criar o place Run e configurar os IDs
+
+1. No Creator Dashboard (ou Studio: **File → Publish As...** → adicionar como novo place na
+   **mesma Experience**), crie o place **Run**.
+2. Anote os dois `PlaceId` (aparecem na URL do place no Dashboard, ou em `game.PlaceId` com o
+   place aberto no Studio).
+3. Preencha `src/Shared/Places.lua`:
+
+```lua
+return {
+	LOBBY = 111111111, -- PlaceId do place inicial (o atual)
+	RUN = 222222222, -- PlaceId do place novo
+}
+```
 
 > Teleporte entre places **só funciona dentro da mesma Experience** e com os places publicados.
 
-### 2. Mover os módulos compartilhados pra `src/Shared/`
-
-`ZoneBuilder.lua` e `ProfileManager.lua` são usados pelos dois places:
-
-- **ZoneBuilder**: o Lobby usa `buildLobby()` + o rig da caravana (ela existe e é pilotável no
-  posto); o Run usa `buildWorld()`/grupos destrutíveis + o mesmo rig.
-- **ProfileManager**: o Lobby carrega/gasta moeda no catálogo; o Run carrega de novo, credita a
-  moeda no `endRun` e libera na saída.
-- `RouteGraph.lua` só precisa existir no Run (mas não custa compartilhar).
-
-### 3. Quebrar o script monolítico em `LobbyServer` e `RunServer`
-
-O `OneWayCaravanNightfallServer.server.lua` (~1300 linhas) vira dois scripts. A linha de corte é
-o "loop lobby -> run" (linha ~1264):
-
-**`LobbyServer.server.lua`** fica com:
-- Infraestrutura comum: remotes, `initPlayer`/`PlayerAdded` com `ProfileManager.load` (linha
-  ~226), `PlayerRemoving` com `ProfileManager.release` (linha ~259-267), `BindToClose` (linha
-  ~271), rate-limit, catálogo/`buyRE` (a compra é validada com `Phase == "Lobby"` — mantenha).
-- `ZoneBuilder.buildCaravana()` + `buildLobby()` + pivô + caravana **destravada** (pilotagem
-  livre no posto murado).
-- O prompt "Iniciar expedição" (linha ~1301): em vez de `started = true` seguir pro setup da
-  run, chama o teleporte de grupo (mudança 4).
-- **Não** leva: waves/pool de inimigos, IA, boss, fases de dia/noite, `RouteGraph`.
-
-**`RunServer.server.lua`** fica com:
-- A mesma infraestrutura comum (duplicada: remotes, initPlayer + load/release/BindToClose,
-  anti-exploit, recursos, estruturas, combate, pool, IA).
-- No boot: `RouteGraph.generate()` → `ZoneBuilder.buildWorld(graph)` → pivô/spawn → o
-  "percurso do POI" (preparação → anoitecer → noite → dia livre → boss) — ou seja, o corpo do
-  loop atual SEM o `while true` externo e SEM a parte de lobby.
-- `endRun` (linha ~1225): em vez de `task.wait(RUN_RESTART_DELAY)` e voltar pro topo do loop,
-  teleporta todo mundo de volta pro Lobby place (mudança 4). A tela de fim de run continua — o
-  delay vira o tempo de leitura antes do teleporte.
-- Jogador que entra no Run place SEM vir de teleporte (ex.: seguiu um amigo no meio da run):
-  aceite e spawne perto da caravana — MVP não precisa de mais que isso.
-
-Cliente: o `OneWayCaravanNightfallClient.client.lua` pode ser compartilhado como está (HUD reage
-a atributos; o que não existir em cada place simplesmente não dispara). O fade `ZoneFade` vira
-cosmético da partida/chegada de teleporte, ou pode ser removido — `TeleportService` já mostra a
-tela de loading nativa entre places.
-
-### 4. Teleporte de grupo com reserved server
-
-API moderna (`TeleportAsync` + `TeleportOptions`), nunca a legada. No **LobbyServer**, no
-`prompt.Triggered`:
-
-```lua
-local TeleportService = game:GetService("TeleportService")
-local Places = require(script.Parent.Places) -- { LOBBY = ..., RUN = ... }
-
-local function startExpedition()
-	local players = Players:GetPlayers() -- lista NO MOMENTO do teleporte
-	local ok, accessCode = pcall(function()
-		return TeleportService:ReserveServer(Places.RUN)
-	end)
-	if not ok then
-		announce("Falha ao reservar servidor — tentem de novo.")
-		return
-	end
-	local options = Instance.new("TeleportOptions")
-	options.ReservedServerAccessCode = accessCode
-	-- opcional: options:SetTeleportData({ ... }) pra levar seed/rota decidida no lobby
-	local success, err = pcall(function()
-		TeleportService:TeleportAsync(Places.RUN, players, options)
-	end)
-	if not success then
-		announce("Teleporte falhou: " .. tostring(err))
-	end
-end
-```
-
-`ReserveServer` + `ReservedServerAccessCode` é o que garante o **grupo inteiro no mesmo
-servidor** (servidor privado, ninguém de fora entra). A volta, no `endRun` do **RunServer**,
-não precisa de reserva:
-
-```lua
-TeleportService:TeleportAsync(Places.LOBBY, Players:GetPlayers())
-```
-
-No cliente, trate `TeleportService.TeleportInitFailed` pra dar feedback se falhar (raro).
-Retry simples com 1-2 tentativas resolve o MVP.
-
-### 5. Dois projetos Rojo
-
-`default.project.json` vira dois, cada um com os Shared + o server-script do seu place:
-
-```
-lobby.project.json  -> ServerScriptService: LobbyServer + Shared/*
-run.project.json    -> ServerScriptService: RunServer + Shared/* + RouteGraph
-```
-
-Ambos mantêm `Workspace.$properties.StreamingEnabled` (o Run precisa; no Lobby é inofensivo) e
-o `StarterPlayerScripts` compartilhado. Pra servir os dois ao mesmo tempo:
-
-```
-rojo serve lobby.project.json               # porta padrão 34872
-rojo serve run.project.json --port 34873
-```
-
-Dois Studios abertos, um em cada place (File → Open from Roblox → escolher o place na
-Experience), cada um conectado ao seu `rojo serve`.
-
 ### 6. Publicar e testar
 
-`TeleportService` **não funciona em Edit/Play local** — teleporta pra servidor real publicado:
+`TeleportService` **não funciona em Edit/Play do Studio** — teleporta pra servidor real:
 
-- Publique os dois places (Publish, não só salvar) pelo menos uma vez antes do teste ponta a
-  ponta; republique a cada iteração no fluxo de teleporte.
-- Iteração rápida: teste cada place isolado com Play normal (lobby sozinho; run sozinho com um
-  bypass de boot que chama `buildWorld` direto), e só publique quando for testar o teleporte.
-- Teste de grupo: 2+ contas (ou "Start Server + Players" local pra tudo que NÃO é teleporte).
-- Critério de aceite: lobby → segurar poste → grupo inteiro cai **no mesmo** servidor de Run →
-  jogar a run → vitória/derrota → grupo volta ao lobby com a moeda creditada no perfil.
+1. Conecte um Rojo em cada place e sincronize:
+   - Run: `rojo serve run.project.json` (porta padrão 34872)
+   - Lobby: `rojo serve lobby.project.json --port 34873`
+   (dois Studios abertos, um em cada place: File → Open from Roblox)
+2. Em cada place, rode `tools/setup_place.lua` na Command Bar 1x e cole o `WeaponClient` na
+   Tool Machado (ver README).
+3. **Publique os dois places** (Publish, não só salvar). Republique a cada iteração no fluxo
+   de teleporte.
+4. Teste no cliente Roblox com 2+ contas. Critério de aceite: lobby → segurar poste → grupo
+   inteiro cai **no mesmo** servidor de Run → jogar a run → vitória/derrota → grupo volta ao
+   lobby com a moeda creditada no perfil.
 
-## Perfil/moeda entre places — nada muda no ProfileManager
+Iteração rápida sem republicar: cada place é testável isolado com Play normal (o Run começa
+uma run direto; o Lobby roda catálogo/caravana e só o teleporte fica indisponível).
 
-Conferido a fundo; o módulo já foi desenhado pra isso (passo 9):
+## Notas de design da implementação
 
-- `SESSION_ID` usa `game.JobId`, único **por servidor na plataforma inteira** (não por place) —
-  o session-lock funciona entre places sem alteração.
-- `PlayerRemoving` dispara também em teleporte (não só desconexão), então
-  `ProfileManager.release` já solta o lock e grava o perfil na saída do Lobby automaticamente.
-- Se o Run carregar o perfil antes do release propagar, `ProfileManager.load` já tem retry com
-  backoff (4 tentativas fora do Studio).
-- Único trabalho: **duplicar** as chamadas triviais em cada script novo (load no
-  `PlayerAdded`, release no `PlayerRemoving`, `releaseAll` no `BindToClose`).
-
-## Ordem sugerida
-
-1. Criar o place Run, anotar `PlaceId`s (mudança 1) e criar `src/Shared/Places.lua`.
-2. Mover `ZoneBuilder`/`ProfileManager` pra `src/Shared/` (mudança 2).
-3. Extrair `LobbyServer` e testar sozinho com Play até catálogo/prompt/caravana funcionarem.
-4. Extrair `RunServer` com bypass de boot e testar a run sozinha até o loop de POI rodar igual.
-5. Escrever os dois `.project.json` e plugar os dois `rojo serve` (mudança 5).
-6. Publicar, plugar o `ReserveServer`/`TeleportAsync` nas duas pontas (mudança 4) e rodar o
-   teste ponta a ponta (mudança 6).
-
-A parte trabalhosa é a 3 (separar lifecycles de um script de ~1300 linhas); a persistência é a
-parte que menos dá trabalho, porque o `ProfileManager` já estava pronto pra isso.
+- **Grupo no mesmo servidor**: `ReserveServer` devolve um access code de servidor privado;
+  `TeleportOptions.ReservedServerAccessCode` faz o `TeleportAsync` levar todo mundo pra ele.
+  Ninguém de fora entra (matchmaking público fica pra depois do MVP, doc 4.2).
+- **Fallback standalone**: `Places.LOBBY/RUN = 0` desativa o teleporte dos dois lados sem
+  quebrar nada — é o que mantém o jogo testável no Studio e o repo utilizável antes do publish.
+- **Jogador que entra no Run place no meio da run** (ex.: follow de amigo): é aceito, spawna
+  no SpawnLocation do POI atual e entra na luta — suficiente pro MVP.
+- **Servidor de Run vazio**: se ninguém chegar em 120s (ou todos saírem no fim), o loop apenas
+  rearma o mundo e espera; a plataforma recicla reserved servers vazios sozinha.
+- O cliente ainda não trata `TeleportInitFailed` com retry automático (raro; o poste rearmado
+  no lobby cobre a retentativa manual). Melhorar se aparecer em playtest.

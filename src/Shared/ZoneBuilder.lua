@@ -1033,7 +1033,7 @@ function ZoneBuilder.pivotCaravanaTo(cf)
 end
 
 -- preview no modo Edit (Command Bar, com Rojo conectado):
---   require(game.ServerScriptService.ZoneBuilder).preview()
+--   require(game.ServerScriptService.Shared.ZoneBuilder).preview()
 function ZoneBuilder.preview(kind)
 	ZoneBuilder.buildCaravana()
 	clearWorld()

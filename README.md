@@ -92,31 +92,49 @@ server-side validada com rate-limit, recursos repõem por amanhecer, fogueira/ba
 fantasma e orientação pelo jogador, comida cura, machado + inimigos com HP server-side e object
 pooling (24 instâncias), downed/revive hold-button, IA com desvio pelo funil, anti speed/teleport.
 
-Próximos passos: **split multiplayer em 2 places** (Lobby + Run com teleporte de grupo, doc 4.2)
-— guia de implementação pronto em [docs/multiplayer-2-places.md](docs/multiplayer-2-places.md);
-e o playtest no device alvo (Chromebook/mobile) pra fechar densidade de POI, cap de inimigos,
-taxas e ritmo (passo 10). Depois, Seção 3.2 (expansão: Carpinteiro primeiro).
+**Split multiplayer em 2 places (doc 4.2): lado de código IMPLEMENTADO** — `LobbyServer` +
+`RunServer` separados, módulos compartilhados em `src/Shared/`, teleporte de grupo via
+`ReserveServer`/`TeleportAsync` nas duas pontas e dois projetos Rojo. Pra ativar falta só o que
+exige o Studio/Dashboard: criar o place Run na Experience, preencher `src/Shared/Places.lua` com
+os dois PlaceIds e publicar — roteiro em [docs/multiplayer-2-places.md](docs/multiplayer-2-places.md).
+Sem isso configurado, cada place roda standalone (testável no Studio normalmente).
+
+Próximos passos: ativar o split (acima) e o playtest no device alvo (Chromebook/mobile) pra
+fechar densidade de POI, cap de inimigos, taxas e ritmo (passo 10). Depois, Seção 3.2
+(expansão: Carpinteiro primeiro).
 
 ## Estrutura
 
-- `src/ServerScriptService/OneWayCaravanNightfallServer.server.lua` — autoridade total (HP, recursos, spawn, dano, morte, rota, trava/soltura da caravana, chegada/permanência por posição, anti-exploit).
-- `src/ServerScriptService/ZoneBuilder.lua` — ModuleScript: constrói o **mundo contínuo** da run em runtime (POIs + corredores + plazas, tudo no mesmo espaço), o rig físico da caravana (VehicleSeat + HingeConstraints) e os grupos destrutíveis (base do "sem volta" do fork).
-- `src/ServerScriptService/RouteGraph.lua` — ModuleScript: grafo DAG da run (3 nós + boss, fork segura/arriscada). Decide os TIPOS de POI; as posições são slots fixos no ZoneBuilder.
-- `src/ServerScriptService/ProfileManager.lua` — ModuleScript: persistência de perfil (doc 4.4) com session-locking; interface pronta pra trocar por ProfileStore.
-- `src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua` — HUD, fade da fronteira lobby↔run, preview de colocação; só envia intenção. A condução é física (input padrão do VehicleSeat), sem remote de direção.
+Dois places (doc 4.2), cada um com seu script de servidor; os módulos em `src/Shared/` são
+sincronizados nos dois:
+
+- `src/ServerScriptService/Run/RunServer.server.lua` — servidor do **Run Place**: autoridade total da run (HP, recursos, spawn, dano, morte, rota, trava/soltura da caravana, chegada/permanência por posição, anti-exploit). Monta o mundo no boot, espera o grupo do teleporte e devolve todo mundo pro lobby no fim; sem `Places` configurado, recomeça a run no mesmo servidor (standalone/Studio).
+- `src/ServerScriptService/Lobby/LobbyServer.server.lua` — servidor do **Lobby Place**: catálogo lateral (compra validada), caravana pilotável no posto murado e o poste "Iniciar expedição" — reserva um servidor do Run Place (`ReserveServer`) e teleporta o grupo inteiro junto (`TeleportAsync`).
+- `src/Shared/ZoneBuilder.lua` — ModuleScript: constrói o **mundo contínuo** da run em runtime (POIs + corredores + plazas), o lobby, o rig físico da caravana (VehicleSeat + HingeConstraints) e os grupos destrutíveis (base do "sem volta" do fork).
+- `src/Shared/RouteGraph.lua` — ModuleScript: grafo DAG da run (3 nós + boss, fork segura/arriscada). Decide os TIPOS de POI; as posições são slots fixos no ZoneBuilder.
+- `src/Shared/ProfileManager.lua` — ModuleScript: persistência de perfil (doc 4.4) com session-locking por `JobId` (funciona entre places sem mudança); interface pronta pra trocar por ProfileStore.
+- `src/Shared/Places.lua` — IDs dos dois places da Experience. **Preencher depois de criar/publicar** (0 = teleporte desativado, modo standalone).
+- `src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua` — HUD e preview de colocação; só envia intenção. Compartilhado pelos dois places; a condução é física (input padrão do VehicleSeat), sem remote de direção.
 - `src/StarterPack/Machado/WeaponClient.client.lua` — LocalScript da Tool Machado.
-- `tools/setup_place.lua` — setup 1x na Command Bar: liga StreamingEnabled, limpa builds antigos e cria a Tool Machado. O mundo é construído em runtime pelo servidor.
-- `default.project.json` — projeto Rojo (declara StreamingEnabled no Workspace).
+- `tools/setup_place.lua` — setup 1x na Command Bar **de cada place**: liga StreamingEnabled, limpa builds antigos e cria a Tool Machado.
+- `run.project.json` / `lobby.project.json` — projetos Rojo, um por place (ambos declaram StreamingEnabled no Workspace e montam `src/Shared` em `ServerScriptService.Shared`).
 
-## Setup num place novo
+## Setup dos places
 
-1. `rojo serve` + plugin Rojo para sincronizar os scripts.
-2. Rode `tools/setup_place.lua` na Command Bar do Studio (modo Edit) — liga o streaming, limpa o place e cria o Machado.
-3. Cole `WeaponClient.client.lua` como LocalScript dentro de `StarterPack.Machado`.
-4. Play. O servidor liga StreamingEnabled, constrói o mundo contínuo e a caravana sozinho.
+1. Crie os dois places na mesma Experience (o Run via **File → Publish As...** ou Creator
+   Dashboard) e preencha `src/Shared/Places.lua` com os dois PlaceIds.
+2. Sirva um projeto Rojo por place (dois Studios abertos, um em cada place):
+   - Run: `rojo serve run.project.json` (porta padrão 34872)
+   - Lobby: `rojo serve lobby.project.json --port 34873`
+3. Em cada place, rode `tools/setup_place.lua` na Command Bar (modo Edit) e cole
+   `WeaponClient.client.lua` como LocalScript dentro de `StarterPack.Machado`.
+4. Play em qualquer um dos dois: o Run constrói o mundo contínuo e começa uma run direto
+   (standalone no Studio); o Lobby monta o posto com catálogo e caravana de treino.
+5. **Teleporte de verdade só publicado**: publique os dois places e teste no cliente Roblox —
+   segurar o poste no lobby deve levar o grupo inteiro pro mesmo servidor de run.
 
 Preview de um POI isolado no modo Edit (opcional, com Rojo conectado):
-`require(game.ServerScriptService.ZoneBuilder).preview("mina")` na Command Bar.
+`require(game.ServerScriptService.Shared.ZoneBuilder).preview("mina")` na Command Bar.
 
 ## Fluxo do jogo (MVP)
 
@@ -151,11 +169,11 @@ Preview de um POI isolado no modo Edit (opcional, com Rojo conectado):
 
 - **Persistência no Studio** exige "Enable Studio Access to API Services" (Game Settings → Security)
   e place publicado; sem isso o `ProfileManager` roda em modo memória (avisa no Output).
-- **Split físico em 2 places** (lobby + run, TeleportService com reserved server, doc 4.2) pendente;
-  o lobby hoje é uma zona no mesmo place, e a fronteira lobby↔run é a única transição de tela (fade)
-  que resta. Guia de implementação passo a passo em
-  [docs/multiplayer-2-places.md](docs/multiplayer-2-places.md). `ProfileManager` caseiro — trocar
-  por ProfileStore (loleris) depois (interface já compatível).
+- **Split físico em 2 places** (doc 4.2): código pronto (LobbyServer/RunServer + teleporte de
+  grupo), mas **inativo até criar o place Run, preencher `src/Shared/Places.lua` e publicar** —
+  roteiro em [docs/multiplayer-2-places.md](docs/multiplayer-2-places.md). O fluxo publicado
+  ponta a ponta (lobby → reserved server → run → volta) ainda não foi testado em produção.
+  `ProfileManager` caseiro — trocar por ProfileStore (loleris) depois (interface já compatível).
 - **Latência de throttle da caravana**: a condução é responsiva pro esterço, mas os motores de
   tração são acionados no servidor a partir do `ThrottleFloat` replicado do motorista, então há ~1
   RTT de atraso na aceleração. Aceitável pra co-op PvE; revisar no playtest (passo 10) — mover o

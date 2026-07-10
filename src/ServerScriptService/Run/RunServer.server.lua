@@ -1,10 +1,12 @@
--- One Way Caravan: Nightfall — MVP servidor autoritativo (design doc v2: Seções 2, 3.1, 4, 6.1–6.8)
+-- One Way Caravan: Nightfall — servidor do RUN PLACE (doc 4.2: instância de uma run).
 -- Toda autoridade de HP, recursos, spawn, dano, morte, rota e economia vive AQUI.
 -- Cliente só envia intenção via RemoteEvents validados e rate-limitados.
 -- Doc 4.5/4.6/5.4 (Revisão 3): a caravana é PILOTADA por um jogador (VehicleSeat) e a run
 -- inteira é um MUNDO CONTÍNUO via StreamingEnabled — POIs e corredores coexistem no mesmo
--- espaço, sem zonas isoladas, sem fade e sem teleporte dentro da run. A única "tela" restante
--- é a fronteira lobby<->run (placeholder do TeleportService do split de places, doc 4.2).
+-- espaço, sem zonas isoladas, sem fade e sem teleporte dentro da run.
+-- Split de places (doc 4.2): o grupo chega junto do Lobby Place via reserved server; no fim
+-- da run, TeleportAsync devolve todo mundo pro lobby. Com Places não configurado (ou Studio,
+-- onde teleporte não funciona), roda em modo standalone: a run recomeça no mesmo servidor.
 -- Chegada em POI é detectada por volume (poll server-side da posição da caravana: .Touched não
 -- é confiável com StreamingEnabled + física no cliente do motorista).
 -- Passo 8: boss no Covil, checkpoint, vitória/derrota (wipe) e moeda de run (doc 5.8).
@@ -13,10 +15,13 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local Lighting = game:GetService("Lighting")
+local TeleportService = game:GetService("TeleportService")
 
-local ZoneBuilder = require(script.Parent.ZoneBuilder)
-local RouteGraph = require(script.Parent.RouteGraph)
-local ProfileManager = require(script.Parent.ProfileManager)
+local Shared = script.Parent:WaitForChild("Shared")
+local ZoneBuilder = require(Shared.ZoneBuilder)
+local RouteGraph = require(Shared.RouteGraph)
+local ProfileManager = require(Shared.ProfileManager)
+local Places = require(Shared.Places)
 
 -- ===== config =====
 local DAY_LENGTH = 90 -- janela de dia livre pós-noite: se ficarem no POI até acabar, a noite volta
@@ -74,11 +79,12 @@ local BARRICADE_REINFORCED_HP = 400
 local BARRICADE_COLOR = Color3.fromRGB(140, 100, 50)
 local BARRICADE_REINFORCED_COLOR = Color3.fromRGB(96, 84, 70)
 local BARRICADE_COLOR_BROKEN = Color3.fromRGB(70, 45, 25)
--- catálogo lateral (doc 5.2: plano, sem árvore; MVP = 1 unlock pra provar o meta-loop ponta a ponta, doc 3.1)
+-- itens de catálogo (doc 5.2): a COMPRA vive no LobbyServer; aqui a tabela só diz quais
+-- construções exigem o unlock Unlock_<id> no perfil (gate do placeRE)
 local CATALOG = {
 	BarricadaReforcada = { name = "Barricada Reforçada", price = 40 },
 }
-local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Buy = 0.5 } -- doc 4.1
+local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5 } -- doc 4.1
 
 -- zona atual (funil, posições da caravana); preenchida pelo loop da run
 local CurrentZone = nil
@@ -109,10 +115,9 @@ local placeRE = ensureRemote("PlaceStructure")
 local eatRE = ensureRemote("EatFood")
 local enemyDiedRE = ensureRemote("EnemyDied")
 local playerDownedRE = ensureRemote("PlayerDowned")
-local zoneFadeRE = ensureRemote("ZoneFade")
 local announceRE = ensureRemote("Announce")
 local runEndedRE = ensureRemote("RunEnded")
-local buyRE = ensureRemote("BuyUnlock")
+ensureRemote("BuyUnlock") -- catálogo é compra de LOBBY (doc 5.2): aqui existe só pro cliente compartilhado não travar em WaitForChild; sem handler
 
 local function ensureFolder(name)
 	local f = workspace:FindFirstChild(name)
@@ -141,8 +146,8 @@ atmosphere.Haze = 1.6
 -- IMPORTANTE: StreamingEnabled/StreamingMinRadius/StreamingTargetRadius são propriedades com
 -- capability "Plugin" — um Script normal NÃO tem permissão pra escrevê-las em runtime ("The
 -- current thread cannot write ... lacking capability Plugin"), só um Plugin ou a sincronização
--- de projeto (Rojo/Studio). Por isso elas são declaradas no default.project.json (Workspace
--- $properties), aplicadas quando o Rojo sincroniza — não tente setá-las daqui.
+-- de projeto (Rojo/Studio). Por isso elas são declaradas nos projetos Rojo (Workspace
+-- $properties em run.project.json/lobby.project.json), aplicadas no sync — não sete daqui.
 
 local function announce(text)
 	announceRE:FireAllClients(text)
@@ -190,7 +195,6 @@ end
 
 -- ===== recursos (contagem 100% server-side; atributo no Player é só espelho p/ UI) =====
 local resources = {} -- [player] = { Wood = n, Food = n }
-local joinOrder = {} -- ordem de entrada; joinOrder[1] = host (desempata votação, doc 5.4)
 
 local function disableNativeRegen(char)
 	-- o script "Health" padrão regenera HP e mascarava o estado Downed; sem ele, comida vira a fonte de cura
@@ -205,7 +209,6 @@ end
 local function initPlayer(plr)
 	if resources[plr] then return end
 	resources[plr] = { Wood = 0, Food = 0 }
-	table.insert(joinOrder, plr)
 	plr:SetAttribute("Wood", 0)
 	plr:SetAttribute("Food", 0)
 	plr:SetAttribute("Downed", false)
@@ -260,11 +263,8 @@ Players.PlayerRemoving:Connect(function(plr)
 	resources[plr] = nil
 	lastCall[plr] = nil
 	lastPos[plr] = nil
-	local i = table.find(joinOrder, plr)
-	if i then
-		table.remove(joinOrder, i)
-	end
-	ProfileManager.release(plr) -- solta o session-lock e grava o perfil (doc 4.4)
+	-- dispara também no teleporte de volta pro lobby: solta o session-lock e grava o perfil
+	ProfileManager.release(plr) -- (doc 4.4)
 	checkWipe() -- se só sobraram caídos, é derrota
 end)
 
@@ -324,29 +324,6 @@ task.spawn(function()
 		end
 	end
 end)
-
--- teleporte legítimo do servidor (SÓ na fronteira lobby<->run): reseta o rastreio anti-teleport.
--- Jogadores sentados na caravana são pulados (o pivô da caravana já os leva junto pelo SeatWeld).
-local function teleportPlayersBehindCaravana()
-	local caravana = workspace:FindFirstChild("Caravana")
-	local base = caravana and caravana:GetPivot() or CFrame.new(CAMP_FALLBACK)
-	local i = 0
-	for _, plr in ipairs(Players:GetPlayers()) do
-		local char = plr.Character
-		local hum = char and char:FindFirstChildOfClass("Humanoid")
-		if char and not (hum and hum.SeatPart) then
-			task.spawn(function()
-				-- prefetch de streaming do destino (não bloqueia; o fade cobre o carregamento)
-				pcall(function()
-					plr:RequestStreamAroundAsync(base.Position, 1)
-				end)
-			end)
-			char:PivotTo(base * CFrame.new(-6 + (i % 4) * 4, 1.5, -12 - math.floor(i / 4) * 4))
-			lastPos[plr] = nil
-			i += 1
-		end
-	end
-end
 
 local function rectContains(r, p)
 	return p.X >= r.minX and p.X <= r.maxX and p.Z >= r.minZ and p.Z <= r.maxZ
@@ -964,20 +941,7 @@ eatRE.OnServerEvent:Connect(function(plr)
 	hum.Health = math.min(hum.MaxHealth, hum.Health + HEAL_PER_FOOD)
 end)
 
-buyRE.OnServerEvent:Connect(function(plr, itemId)
-	if not rateOk(plr, "Buy") then return end
-	if RS:GetAttribute("Phase") ~= "Lobby" then return end -- catálogo é compra de lobby (doc 5.2)
-	if type(itemId) ~= "string" then return end
-	local item = CATALOG[itemId]
-	if not item then return end
-	local ok, err = ProfileManager.tryBuy(plr, itemId, item.price)
-	if ok then
-		announceRE:FireClient(plr, "Desbloqueado: " .. item.name .. "! Vale pra todas as próximas runs.")
-		print("[One Way Caravan: Nightfall] " .. plr.Name .. " comprou " .. itemId)
-	else
-		announceRE:FireClient(plr, "Compra falhou: " .. tostring(err))
-	end
-end)
+-- (sem handler de BuyUnlock aqui: catálogo é compra de LOBBY, doc 5.2 — ver LobbyServer)
 
 -- ===== ambiente / fases =====
 local function applyDayAmbience()
@@ -1243,7 +1207,21 @@ local function endRun(victory)
 	else
 		announce("Fim da run. Moeda do checkpoint creditada no perfil: " .. earned .. ". De volta ao lobby em " .. RUN_RESTART_DELAY .. "s...")
 	end
-	task.wait(RUN_RESTART_DELAY)
+	task.wait(RUN_RESTART_DELAY) -- tempo de ler a tela de fim de run
+
+	-- volta pro Lobby Place (doc 4.2). PlayerRemoving solta o session-lock de cada perfil na
+	-- saída; o reserved server esvazia e é reciclado pela plataforma. Se o teleporte não rolar
+	-- (Studio, Places sem configurar, erro transitório), quem ficou recomeça uma run nova aqui
+	-- mesmo (modo standalone — é o fallback que mantém o place testável sozinho).
+	if Places.LOBBY ~= 0 and #Players:GetPlayers() > 0 then
+		pcall(function()
+			TeleportService:TeleportAsync(Places.LOBBY, Players:GetPlayers())
+		end)
+		local t0 = os.clock()
+		while #Players:GetPlayers() > 0 and os.clock() - t0 < 15 do
+			task.wait(1)
+		end
+	end
 end
 
 local function resetPlayersForNewRun()
@@ -1261,70 +1239,46 @@ local function resetPlayersForNewRun()
 	end
 end
 
--- ===== loop lobby -> run (passo 9: meta-loop; lobby lógico no mesmo place até o publish em 2 places, doc 4.2) =====
+-- ===== loop da run (doc 4.2: este servidor É uma instância de run) =====
+-- O mundo é montado ANTES de esperar o grupo: quem chega do teleporte já spawna no SpawnLocation
+-- do primeiro POI, ao lado da caravana. Ao fim, endRun teleporta de volta pro lobby; se sobrar
+-- alguém (Studio/standalone), o loop recomeça uma run nova no mesmo servidor.
 task.spawn(function()
 	ZoneBuilder.buildCaravana()
 	while true do
-		-- LOBBY: gastar moeda do perfil no catálogo e partir quando o grupo quiser
-		ZoneBuilder.setCaravanaLocked(true)
+		-- SETUP DA RUN: o mundo contínuo inteiro é montado de uma vez (doc 4.6); StreamingEnabled
+		-- carrega/descarrega geometria por proximidade — sem loading screen dentro da run.
+		local graph = RouteGraph.generate()
 		ZoneBuilder.unseatAll()
-		local lobby = ZoneBuilder.buildLobby()
-		CurrentZone = lobby
-		ZoneBuilder.pivotCaravanaTo(lobby.caravanaCf)
+		local currentId = graph.currentId
+		local node = graph.nodes[currentId]
+		RunWorld = ZoneBuilder.buildWorld(graph)
+		CurrentZone = RunWorld.zones[currentId]
+		ZoneBuilder.setCaravanaLocked(true)
+		ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
+		ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
 		runCurrency, checkpointCurrency, nightCount = 0, 0, 0
 		syncCurrency()
-		RS:SetAttribute("Phase", "Lobby")
-		RS:SetAttribute("NodeName", "Posto de Partida")
+		RS:SetAttribute("NodeName", node.label)
 		RS:SetAttribute("PhaseTimeLeft", 0)
 		RS:SetAttribute("BossHP", 0)
 		RS:SetAttribute("Cycle", 0)
 		RS:SetAttribute("EnemiesAlive", 0)
 		applyDayAmbience()
 		Lighting.ClockTime = 12
-		resetPlayersForNewRun()
-		task.wait(1)
-		teleportPlayersBehindCaravana()
-		-- destrava a caravana no posto: espaço seguro e fechado por muros, dá pra treinar a
-		-- pilotagem (VehicleSeat) antes da run de verdade sem risco. unseatAll+lock reancoram
-		-- ela ao voltar pro lobby (linha acima) e ao entrar na run (setup abaixo).
-		ZoneBuilder.setCaravanaLocked(false)
-		announce("Lobby: gastem a moeda no catálogo (painel à direita) e segurem o poste de partida quando estiverem prontos.")
+		resetPlayersForNewRun() -- respawna quem já está aqui (rodada standalone) no novo mundo
 
-		local prompt = Instance.new("ProximityPrompt")
-		prompt.ActionText = "Iniciar expedição"
-		prompt.ObjectText = "Caravana pronta"
-		prompt.HoldDuration = 2
-		prompt.RequiresLineOfSight = false
-		prompt.MaxActivationDistance = 12
-		prompt.Parent = lobby.startPost
-		local started = false
-		prompt.Triggered:Connect(function()
-			started = true
-		end)
-		while not started do
+		-- espera o grupo do teleporte chegar (os jogadores entram escalonados nos primeiros
+		-- segundos do reserved server); servidor vazio fica em espera até a plataforma reciclar
+		local t0 = os.clock()
+		while #Players:GetPlayers() == 0 and os.clock() - t0 < 120 do
 			task.wait(0.5)
 		end
-		prompt:Destroy()
-		announce("A expedição parte!")
-		task.wait(1.5)
+		if #Players:GetPlayers() == 0 then
+			continue -- ninguém veio nesta janela; rearma o mundo e segue esperando
+		end
+		task.wait(2) -- folga pros retardatários do mesmo grupo carregarem
 
-		-- SETUP DA RUN: o mundo contínuo inteiro é montado de uma vez (doc 4.6); StreamingEnabled
-		-- carrega/descarrega geometria por proximidade. O fade aqui cobre SÓ a fronteira lobby->run
-		-- (placeholder do TeleportService entre places, doc 4.2), não uma troca de zona interna.
-		local graph = RouteGraph.generate()
-		ZoneBuilder.unseatAll()
-		zoneFadeRE:FireAllClients(true)
-		task.wait(0.7)
-		RunWorld = ZoneBuilder.buildWorld(graph)
-		local currentId = graph.currentId
-		local node = graph.nodes[currentId]
-		CurrentZone = RunWorld.zones[currentId]
-		ZoneBuilder.setCaravanaLocked(true)
-		ZoneBuilder.moveSpawnLocation(CurrentZone.spawnPos)
-		ZoneBuilder.pivotCaravanaTo(CurrentZone.campCf)
-		teleportPlayersBehindCaravana()
-		zoneFadeRE:FireAllClients(false)
-		RS:SetAttribute("NodeName", node.label)
 		runState.defeated = false
 		runState.active = true
 
@@ -1380,8 +1334,8 @@ task.spawn(function()
 		end
 
 		runState.active = false
-		endRun(victory)
+		endRun(victory) -- credita a moeda, mostra a tela e teleporta o grupo de volta pro lobby
 	end
 end)
 
-print("[One Way Caravan: Nightfall] Servidor inicializado")
+print("[One Way Caravan: Nightfall] RunServer inicializado (place " .. game.PlaceId .. ")")
