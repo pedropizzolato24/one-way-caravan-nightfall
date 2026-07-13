@@ -1,16 +1,19 @@
--- Setup mínimo do place (rodar 1x na Command Bar do Studio, modo Edit).
--- O MAPA agora é construído em RUNTIME pelo servidor (ZoneBuilder), porque o passo 7 sequencia
--- várias zonas por run (POIs + travessia). Este script só:
+-- Setup mínimo de place (rodar 1x na Command Bar do Studio, modo Edit — EM CADA PLACE:
+-- tanto no Lobby quanto no Run, doc 4.2). O MAPA é construído em RUNTIME pelo servidor
+-- (Shared/ZoneBuilder). Este script só:
 --   1. limpa restos de builds antigos (grey-box / mapa estático)
---   2. cria a Tool Machado no StarterPack (Tool com LocalScript não dá pra criar em runtime)
+--   2. cria a Tool Machado no StarterPack (Tool com LocalScript não dá pra criar em runtime;
+--      no Lobby ela é inócua — não há inimigos — mas manter os StarterPacks iguais simplifica)
 -- Depois: cole WeaponClient.client.lua como LocalScript dentro de StarterPack.Machado.
 --
--- Preview de zona no modo Edit (opcional, com Rojo conectado):
---   require(game.ServerScriptService.ZoneBuilder).preview()          -- estação
---   require(game.ServerScriptService.ZoneBuilder).preview("mina")    -- ou outro tipo
+-- Preview de POI no modo Edit (opcional, com Rojo conectado):
+--   require(game.ServerScriptService.Shared.ZoneBuilder).preview()          -- estação
+--   require(game.ServerScriptService.Shared.ZoneBuilder).preview("mina")    -- ou outro tipo
 
--- mundo contínuo por streaming (doc 4.5/4.6): o servidor também liga isso em runtime, mas deixar
--- ligado no place evita um primeiro frame sem streaming
+-- mundo contínuo por streaming (doc 4.5/4.6): já é declarado nos projetos Rojo
+-- (lobby.project.json / run.project.json) e aplicado no sync; rodar aqui também é redundante
+-- mas inofensivo (Command Bar tem capability de Plugin, diferente de um Script normal em
+-- ServerScriptService — não mova isso pro servidor, ele não tem permissão em runtime).
 workspace.StreamingEnabled = true
 
 -- limpeza de builds antigos (inclui "Mundo", o novo container contínuo)

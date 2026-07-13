@@ -1,5 +1,5 @@
 {
-  "name": "one-way-caravan-nightfall",
+  "name": "one-way-caravan-nightfall-lobby",
   "tree": {
     "$className": "DataModel",
     "Workspace": {
@@ -12,17 +12,11 @@
     },
     "ServerScriptService": {
       "$className": "ServerScriptService",
-      "OneWayCaravanNightfallServer": {
-        "$path": "src/ServerScriptService/OneWayCaravanNightfallServer.server.lua"
+      "LobbyServer": {
+        "$path": "src/ServerScriptService/Lobby/LobbyServer.server.lua"
       },
-      "ZoneBuilder": {
-        "$path": "src/ServerScriptService/ZoneBuilder.lua"
-      },
-      "RouteGraph": {
-        "$path": "src/ServerScriptService/RouteGraph.lua"
-      },
-      "ProfileManager": {
-        "$path": "src/ServerScriptService/ProfileManager.lua"
+      "Shared": {
+        "$path": "src/Shared"
       }
     },
     "StarterPlayer": {
