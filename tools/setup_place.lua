@@ -21,6 +21,19 @@ for _, n in ipairs({ "Mundo", "ResourceNodes", "Structures", "Enemies", "EnemySp
 	local x = workspace:FindFirstChild(n)
 	if x then x:Destroy() end
 end
+
+-- scripts LEGADOS do projeto de place único (pré-split, doc 4.2): o Rojo não remove instância
+-- que saiu do projeto, então o monolito antigo ficaria rodando JUNTO com o LobbyServer/RunServer
+-- (dois game loops). Remove o servidor antigo e os ModuleScripts soltos na raiz do SSS
+-- (as versões novas vivem dentro de ServerScriptService.Shared).
+local SSS = game:GetService("ServerScriptService")
+for _, n in ipairs({ "OneWayCaravanNightfallServer", "ZoneBuilder", "RouteGraph", "ProfileManager" }) do
+	local x = SSS:FindFirstChild(n)
+	if x then
+		x:Destroy()
+		print("[setup] Script legado removido de ServerScriptService: " .. n)
+	end
+end
 local old = game.ReplicatedStorage:FindFirstChild("Remotes")
 if old then old:Destroy() end
 old = game.StarterPack:FindFirstChild("Machado")
