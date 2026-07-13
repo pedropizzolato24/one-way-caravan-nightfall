@@ -16,7 +16,8 @@ local TEMPLATE = { -- schema do doc 4.4
 	currency = 0,
 	unlockedCatalog = {},
 	unlockedClasses = {},
-	unlockedPassives = {},
+	unlockedPassives = {}, -- classeId -> { [passivaId] = true }
+	selectedClass = "None", -- Seção 3.2 item 1: classe ativa do jogador (grátis, ver Shared/Classes)
 	cosmetics = { owned = {}, equipped = {} },
 	dailyMissions = { active = {}, lastRollUtc = 0 },
 	loginStreak = { count = 0, lastLoginUtc = 0 },
@@ -64,8 +65,14 @@ local function sync(plr)
 	if not e or not plr.Parent then return end
 	plr:SetAttribute("ProfileCurrency", e.Data.currency or 0)
 	plr:SetAttribute("ProfileLoaded", e.loaded == true)
+	plr:SetAttribute("SelectedClass", e.Data.selectedClass or "None")
 	for _, id in ipairs(e.Data.unlockedCatalog or {}) do
 		plr:SetAttribute("Unlock_" .. id, true)
+	end
+	for classId, passives in pairs(e.Data.unlockedPassives or {}) do
+		for passiveId in pairs(passives) do
+			plr:SetAttribute("Passive_" .. classId .. "_" .. passiveId, true)
+		end
 	end
 end
 
@@ -163,6 +170,45 @@ function ProfileManager.tryBuy(plr, id, price)
 	end
 	e.Data.currency -= price
 	table.insert(e.Data.unlockedCatalog, id)
+	sync(plr)
+	task.spawn(persist, plr, false)
+	return true
+end
+
+-- Seção 3.2 item 1 (classes): seleção é grátis (ver Shared/Classes.lua) — classId="None" remove a classe.
+function ProfileManager.selectClass(plr, classId)
+	local e = ProfileManager.get(plr)
+	if not e then
+		return false, "perfil ainda carregando"
+	end
+	e.Data.selectedClass = classId
+	sync(plr)
+	task.spawn(persist, plr, false)
+	return true
+end
+
+function ProfileManager.isPassiveUnlocked(plr, classId, passiveId)
+	local e = ProfileManager.get(plr)
+	if not e then return false end
+	local classPassives = e.Data.unlockedPassives[classId]
+	return classPassives ~= nil and classPassives[passiveId] == true
+end
+
+-- doc 5.6: passivas desbloqueáveis (moeda de perfil, persistente — ver Shared/Classes.lua)
+function ProfileManager.tryBuyPassive(plr, classId, passiveId, price)
+	local e = ProfileManager.get(plr)
+	if not e then
+		return false, "perfil ainda carregando"
+	end
+	e.Data.unlockedPassives[classId] = e.Data.unlockedPassives[classId] or {}
+	if e.Data.unlockedPassives[classId][passiveId] then
+		return false, "já desbloqueado"
+	end
+	if (e.Data.currency or 0) < price then
+		return false, "moeda insuficiente (" .. (e.Data.currency or 0) .. "/" .. price .. ")"
+	end
+	e.Data.currency -= price
+	e.Data.unlockedPassives[classId][passiveId] = true
 	sync(plr)
 	task.spawn(persist, plr, false)
 	return true

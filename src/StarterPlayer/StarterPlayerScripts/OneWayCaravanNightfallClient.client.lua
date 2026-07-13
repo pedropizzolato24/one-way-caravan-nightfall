@@ -14,6 +14,9 @@ local eatRE = remotes:WaitForChild("EatFood")
 local announceRE = remotes:WaitForChild("Announce")
 local runEndedRE = remotes:WaitForChild("RunEnded")
 local buyRE = remotes:WaitForChild("BuyUnlock")
+local selectClassRE = remotes:WaitForChild("SelectClass") -- Seção 3.2: escolha de classe (Lobby)
+local buyPassiveRE = remotes:WaitForChild("BuyPassive") -- unlock de passiva de classe (Lobby)
+local convertRE = remotes:WaitForChild("ConvertResource") -- ação exclusiva do Carpinteiro (Run)
 local mouse = plr:GetMouse()
 
 -- espelhos p/ feedback visual; a validação real é sempre do servidor
@@ -95,6 +98,7 @@ local BTN_COLORS = {
 	BuildBarricade = Color3.fromRGB(50, 70, 50),
 	BuildBarricadeR = Color3.fromRGB(50, 62, 78),
 	Eat = Color3.fromRGB(90, 70, 40),
+	Convert = Color3.fromRGB(70, 58, 40),
 }
 local BTN_DISABLED = Color3.fromRGB(55, 55, 55)
 
@@ -117,11 +121,18 @@ local fireBtn = mkButton("BuildFire", UDim2.new(0, 8, 1, -174), "Fogueira (5 mad
 local barrBtn = mkButton("BuildBarricade", UDim2.new(0, 8, 1, -132), "Barricada (10 madeira)")
 local barrRefBtn = mkButton("BuildBarricadeR", UDim2.new(0, 8, 1, -90), "Barricada Reforçada (16)")
 local eatBtn = mkButton("Eat", UDim2.new(0, 8, 1, -48), "Comer (1 comida, +25 vida)")
+-- Seção 3.2 (Carpinteiro): só aparece pra quem tem a passiva Conversão de Recurso
+local convertBtn = mkButton("Convert", UDim2.new(0, 8, 1, -6), "Converter (3 madeira -> 1 comida)")
+convertBtn.Visible = false
 
 local function refreshUnlocks()
 	barrRefBtn.Visible = plr:GetAttribute("Unlock_BarricadaReforcada") == true
+	convertBtn.Visible = plr:GetAttribute("SelectedClass") == "Carpinteiro"
+		and plr:GetAttribute("Passive_Carpinteiro_ConversaoRecurso") == true
 end
 plr:GetAttributeChangedSignal("Unlock_BarricadaReforcada"):Connect(refreshUnlocks)
+plr:GetAttributeChangedSignal("SelectedClass"):Connect(refreshUnlocks)
+plr:GetAttributeChangedSignal("Passive_Carpinteiro_ConversaoRecurso"):Connect(refreshUnlocks)
 refreshUnlocks()
 
 local function refreshRes()
@@ -132,10 +143,15 @@ local function refreshRes()
 	barrBtn.BackgroundColor3 = wood >= COSTS.Barricada.Wood and BTN_COLORS.BuildBarricade or BTN_DISABLED
 	barrRefBtn.BackgroundColor3 = wood >= COSTS.BarricadaReforcada.Wood and BTN_COLORS.BuildBarricadeR or BTN_DISABLED
 	eatBtn.BackgroundColor3 = food >= 1 and BTN_COLORS.Eat or BTN_DISABLED
+	convertBtn.BackgroundColor3 = wood >= 3 and BTN_COLORS.Convert or BTN_DISABLED
 end
 plr:GetAttributeChangedSignal("Wood"):Connect(refreshRes)
 plr:GetAttributeChangedSignal("Food"):Connect(refreshRes)
 refreshRes()
+
+convertBtn.MouseButton1Click:Connect(function()
+	convertRE:FireServer()
+end)
 
 local PHASE_COLORS = {
 	Noite = Color3.fromRGB(45, 25, 70),
@@ -327,6 +343,154 @@ local function refreshCatalogVisible()
 end
 RS:GetAttributeChangedSignal("Phase"):Connect(refreshCatalogVisible)
 refreshCatalogVisible()
+
+-- ===== classes (Seção 3.2 item 1, doc 5.6): só Carpinteiro por enquanto. Painel espelha o
+-- catálogo, mas do lado esquerdo — seleção é grátis, as 2 passivas custam moeda de perfil =====
+local CLASSES_UI = {
+	{
+		id = "Carpinteiro",
+		name = "Carpinteiro",
+		basePassiveDesc = "Base: craft/reparo rápido — constrói e repara barricada quebrada mais rápido.",
+		passives = {
+			{ id = "Fortificar", name = "Fortificar", price = 60,
+				desc = "Fortifica uma barricada: ao ser destruída, vira 'quebrada' (reparável) em vez de sumir." },
+			{ id = "ConversaoRecurso", name = "Conversão de Recurso", price = 60,
+				desc = "Converte madeira em comida (3:1)." },
+		},
+	},
+}
+
+local classFrame = Instance.new("Frame")
+classFrame.Name = "Classes"
+classFrame.AnchorPoint = Vector2.new(0, 0.5)
+classFrame.Position = UDim2.new(0, 8, 0.5, 0)
+classFrame.Size = UDim2.new(0, 260, 0, 400)
+classFrame.BackgroundColor3 = Color3.fromRGB(24, 20, 16)
+classFrame.BackgroundTransparency = 0.15
+classFrame.Visible = false
+classFrame.Parent = gui
+round(classFrame)
+
+local classTitle = Instance.new("TextLabel")
+classTitle.Position = UDim2.new(0, 8, 0, 6)
+classTitle.Size = UDim2.new(1, -16, 0, 26)
+classTitle.BackgroundTransparency = 1
+classTitle.TextColor3 = Color3.new(1, 1, 1)
+classTitle.TextScaled = true
+classTitle.Font = Enum.Font.SourceSansBold
+classTitle.Text = "Classe"
+classTitle.Parent = classFrame
+
+local noClassBtn = Instance.new("TextButton")
+noClassBtn.Position = UDim2.new(0, 8, 0, 36)
+noClassBtn.Size = UDim2.new(1, -16, 0, 28)
+noClassBtn.TextColor3 = Color3.new(1, 1, 1)
+noClassBtn.TextScaled = true
+noClassBtn.Font = Enum.Font.SourceSansBold
+noClassBtn.Text = "Nenhuma (modelo universal)"
+noClassBtn.Parent = classFrame
+round(noClassBtn)
+noClassBtn.MouseButton1Click:Connect(function()
+	selectClassRE:FireServer("None")
+end)
+
+local selectButtons = { None = noClassBtn } -- id -> TextButton (destaque de quem está selecionada)
+local passiveButtons = {} -- "classId/passiveId" -> TextButton
+
+local y = 70
+for _, class in ipairs(CLASSES_UI) do
+	local classBtn = Instance.new("TextButton")
+	classBtn.Position = UDim2.new(0, 8, 0, y)
+	classBtn.Size = UDim2.new(1, -16, 0, 28)
+	classBtn.TextColor3 = Color3.new(1, 1, 1)
+	classBtn.TextScaled = true
+	classBtn.Font = Enum.Font.SourceSansBold
+	classBtn.Text = class.name
+	classBtn.Parent = classFrame
+	round(classBtn)
+	classBtn.MouseButton1Click:Connect(function()
+		selectClassRE:FireServer(class.id)
+	end)
+	selectButtons[class.id] = classBtn
+	y += 32
+
+	local baseLbl = Instance.new("TextLabel")
+	baseLbl.Position = UDim2.new(0, 8, 0, y)
+	baseLbl.Size = UDim2.new(1, -16, 0, 34)
+	baseLbl.BackgroundTransparency = 1
+	baseLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+	baseLbl.TextSize = 13
+	baseLbl.TextWrapped = true
+	baseLbl.TextYAlignment = Enum.TextYAlignment.Top
+	baseLbl.Font = Enum.Font.SourceSans
+	baseLbl.Text = class.basePassiveDesc
+	baseLbl.Parent = classFrame
+	y += 38
+
+	for _, passive in ipairs(class.passives) do
+		local descLbl = Instance.new("TextLabel")
+		descLbl.Position = UDim2.new(0, 8, 0, y)
+		descLbl.Size = UDim2.new(1, -16, 0, 34)
+		descLbl.BackgroundTransparency = 1
+		descLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+		descLbl.TextSize = 13
+		descLbl.TextWrapped = true
+		descLbl.TextYAlignment = Enum.TextYAlignment.Top
+		descLbl.Font = Enum.Font.SourceSans
+		descLbl.Text = passive.desc
+		descLbl.Parent = classFrame
+		y += 36
+
+		local buyBtn = Instance.new("TextButton")
+		buyBtn.Position = UDim2.new(0, 8, 0, y)
+		buyBtn.Size = UDim2.new(1, -16, 0, 28)
+		buyBtn.TextColor3 = Color3.new(1, 1, 1)
+		buyBtn.TextScaled = true
+		buyBtn.Font = Enum.Font.SourceSansBold
+		buyBtn.Parent = classFrame
+		round(buyBtn)
+		buyBtn.MouseButton1Click:Connect(function()
+			buyPassiveRE:FireServer(class.id, passive.id)
+		end)
+		passiveButtons[class.id .. "/" .. passive.id] = buyBtn
+		y += 34
+	end
+	y += 8
+end
+classFrame.Size = UDim2.new(0, 260, 0, y + 8)
+
+local function refreshClasses()
+	local wallet = plr:GetAttribute("ProfileCurrency") or 0
+	local selected = plr:GetAttribute("SelectedClass") or "None"
+	for id, b in pairs(selectButtons) do
+		b.BackgroundColor3 = (id == selected) and Color3.fromRGB(70, 110, 70) or Color3.fromRGB(50, 44, 36)
+	end
+	for _, class in ipairs(CLASSES_UI) do
+		for _, passive in ipairs(class.passives) do
+			local b = passiveButtons[class.id .. "/" .. passive.id]
+			if b then
+				local owned = plr:GetAttribute("Passive_" .. class.id .. "_" .. passive.id) == true
+				b.Text = owned and (passive.name .. " — desbloqueado") or (passive.name .. " (" .. passive.price .. ")")
+				b.BackgroundColor3 = owned and Color3.fromRGB(45, 65, 45)
+					or (wallet >= passive.price and Color3.fromRGB(60, 95, 60) or Color3.fromRGB(55, 55, 55))
+			end
+		end
+	end
+end
+plr:GetAttributeChangedSignal("ProfileCurrency"):Connect(refreshClasses)
+plr:GetAttributeChangedSignal("SelectedClass"):Connect(refreshClasses)
+for _, class in ipairs(CLASSES_UI) do
+	for _, passive in ipairs(class.passives) do
+		plr:GetAttributeChangedSignal("Passive_" .. class.id .. "_" .. passive.id):Connect(refreshClasses)
+	end
+end
+refreshClasses()
+
+local function refreshClassVisible()
+	classFrame.Visible = RS:GetAttribute("Phase") == "Lobby"
+end
+RS:GetAttributeChangedSignal("Phase"):Connect(refreshClassVisible)
+refreshClassVisible()
 
 -- ===== tela de fim de run =====
 local endFrame = Instance.new("Frame")

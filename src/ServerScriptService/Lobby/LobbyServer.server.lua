@@ -12,6 +12,7 @@ local Shared = script.Parent:WaitForChild("Shared")
 local ZoneBuilder = require(Shared.ZoneBuilder)
 local ProfileManager = require(Shared.ProfileManager)
 local Places = require(Shared.Places)
+local Classes = require(Shared.Classes) -- Seção 3.2 item 1: roster de classes (só Carpinteiro por ora)
 
 -- segura o spawn até o posto existir (evita o 1º jogador spawnar na origem antes do buildLobby)
 Players.CharacterAutoLoads = false
@@ -21,7 +22,7 @@ local lobbyReady = false
 local CATALOG = {
 	BarricadaReforcada = { name = "Barricada Reforçada", price = 40 },
 }
-local RATE_LIMIT = { Buy = 0.5 } -- doc 4.1
+local RATE_LIMIT = { Buy = 0.5, SelectClass = 0.5, BuyPassive = 0.5 } -- doc 4.1
 
 -- ===== infraestrutura: TODOS os remotes existem nos dois places (contrato de WaitForChild do
 -- cliente compartilhado); no lobby só o BuyUnlock tem handler — os demais ficam mudos =====
@@ -40,11 +41,13 @@ local function ensureRemote(name)
 	end
 	return r
 end
-for _, name in ipairs({ "CollectResource", "DamageEnemy", "PlaceStructure", "EatFood", "EnemyDied", "PlayerDowned", "RunEnded" }) do
+for _, name in ipairs({ "CollectResource", "DamageEnemy", "PlaceStructure", "EatFood", "EnemyDied", "PlayerDowned", "RunEnded", "ConvertResource" }) do
 	ensureRemote(name)
 end
 local announceRE = ensureRemote("Announce")
 local buyRE = ensureRemote("BuyUnlock")
+local selectClassRE = ensureRemote("SelectClass") -- Seção 3.2: escolha de classe é grátis (Lobby-only)
+local buyPassiveRE = ensureRemote("BuyPassive") -- unlock de passiva de classe (moeda de perfil, Lobby-only)
 
 local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
 if not atmosphere then
@@ -121,6 +124,33 @@ buyRE.OnServerEvent:Connect(function(plr, itemId)
 	if ok then
 		announceRE:FireClient(plr, "Desbloqueado: " .. item.name .. "! Vale pra todas as próximas runs.")
 		print("[One Way Caravan: Nightfall] " .. plr.Name .. " comprou " .. itemId)
+	else
+		announceRE:FireClient(plr, "Compra falhou: " .. tostring(err))
+	end
+end)
+
+-- ===== classes (Seção 3.2 item 1, doc 5.6): seleção grátis + unlock de passiva (moeda de perfil) =====
+selectClassRE.OnServerEvent:Connect(function(plr, classId)
+	if not rateOk(plr, "SelectClass") then return end
+	if classId ~= "None" and type(classId) ~= "string" then return end
+	if classId ~= "None" and not Classes[classId] then return end -- só o roster liberado (Carpinteiro)
+	if ProfileManager.selectClass(plr, classId) then
+		local label = classId == "None" and "nenhuma classe" or Classes[classId].name
+		announceRE:FireClient(plr, "Classe selecionada: " .. label .. ".")
+	end
+end)
+
+buyPassiveRE.OnServerEvent:Connect(function(plr, classId, passiveId)
+	if not rateOk(plr, "BuyPassive") then return end
+	if RS:GetAttribute("Phase") ~= "Lobby" then return end
+	if type(classId) ~= "string" or type(passiveId) ~= "string" then return end
+	local class = Classes[classId]
+	local passive = class and class.passives[passiveId]
+	if not passive then return end
+	local ok, err = ProfileManager.tryBuyPassive(plr, classId, passiveId, passive.price)
+	if ok then
+		announceRE:FireClient(plr, "Desbloqueado: " .. class.name .. " — " .. passive.name .. "!")
+		print("[One Way Caravan: Nightfall] " .. plr.Name .. " comprou passiva " .. classId .. "/" .. passiveId)
 	else
 		announceRE:FireClient(plr, "Compra falhou: " .. tostring(err))
 	end

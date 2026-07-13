@@ -7,7 +7,34 @@ Design completo em [docs/OneWayCaravanNightfall_Roblox_Design_Doc_v2.md](docs/On
 ## Status
 
 **Passos 1–9 da ordem de build (Seção 6) implementados, com o modelo de caravana e travessia
-reconstruído para a Revisão 3 do doc (seções 4.5/4.6/5.4).**
+reconstruído para a Revisão 3 do doc (seções 4.5/4.6/5.4). MVP completo; passo 10 (playtest no
+device alvo) pendente. Seção 3.2 (expansão pós-MVP) iniciada: item 1, Carpinteiro.**
+
+### Carpinteiro (Seção 3.2 item 1, doc 5.6) — 1ª classe pós-MVP
+
+Objetivo do doc: provar que classe adiciona sem virar mandatória (pilar 3). Implementado:
+
+- **Seleção de classe** (Lobby, painel à esquerda): grátis, troca a qualquer momento antes de
+  partir. `[PLACEHOLDER]` o doc não define custo pra classes do roster base (só as exclusivas de
+  Robux são pagas) — tratamos seleção como grátis; só as passivas custam.
+- **Passiva base — craft/reparo rápido**: cooldown de construção menor (`CARPINTEIRO_PLACE_RATE`)
+  e o prompt de reparo de barricada quebrada exige menos tempo segurando.
+- **Unlock "Fortificar"** (60 moeda de perfil `[PLACEHOLDER]`): ação exclusiva do Carpinteiro.
+  Fortifica uma barricada recém-construída (custo 8 madeira `[PLACEHOLDER]`); quando ela é
+  destruída, em vez de sumir vira **"quebrada"**: para de bloquear o funil (a IA não briga mais
+  com ela — evita ficar presa lutando contra destroços), mas o corpo físico segue no lugar
+  (ainda colide, "só desacelera" por obstrução física, doc Seção 2). Reparável por **qualquer**
+  jogador (custo 6 madeira `[PLACEHOLDER]`, mais rápido pro Carpinteiro).
+- **Unlock "Conversão de Recurso"** (60 moeda de perfil `[PLACEHOLDER]`): ação exclusiva, converte
+  3 madeira → 1 comida (taxa do doc Seção 7, placeholder de playtest), botão dedicado no HUD.
+- Persistência: `unlockedPassives` (já existia no schema do perfil, doc 4.4, nunca tinha sido
+  usado) + `selectedClass` novo. Compra reaproveita o mesmo fluxo de `tryBuy`/catálogo lateral.
+- **Decisão de escopo:** o doc não nomeia um "kit inicial" específico do Carpinteiro (só descreve
+  a passiva de velocidade) — não inventamos um item; a classe hoje é só passiva base + 2 unlocks.
+
+Compra e seleção vivem no `LobbyServer`; os efeitos de gameplay (fortificar/reparar/converter)
+vivem no `RunServer`. Roster compartilhado em `src/Shared/Classes.lua` — as próximas 3 classes
+(Seção 3.2 item 4) entram como novas entradas nesse arquivo.
 
 ### Caravana e travessia (Revisão 3 — reconstrução)
 
@@ -114,6 +141,7 @@ sincronizados nos dois:
 - `src/Shared/RouteGraph.lua` — ModuleScript: grafo DAG da run (3 nós + boss, fork segura/arriscada). Decide os TIPOS de POI; as posições são slots fixos no ZoneBuilder.
 - `src/Shared/ProfileManager.lua` — ModuleScript: persistência de perfil (doc 4.4) com session-locking por `JobId` (funciona entre places sem mudança); interface pronta pra trocar por ProfileStore.
 - `src/Shared/Places.lua` — IDs dos dois places da Experience. **Preencher depois de criar/publicar** (0 = teleporte desativado, modo standalone).
+- `src/Shared/Classes.lua` — ModuleScript: roster de classes (doc 5.6). Só Carpinteiro por ora (Seção 3.2 item 1); as próximas entram como novas entradas aqui.
 - `src/StarterPlayer/StarterPlayerScripts/OneWayCaravanNightfallClient.client.lua` — HUD e preview de colocação; só envia intenção. Compartilhado pelos dois places; a condução é física (input padrão do VehicleSeat), sem remote de direção.
 - `src/StarterPack/Machado/WeaponClient.client.lua` — LocalScript da Tool Machado.
 - `tools/setup_place.lua` — setup 1x na Command Bar **de cada place**: liga StreamingEnabled, limpa builds antigos e cria a Tool Machado.
@@ -192,4 +220,8 @@ Preview de um POI isolado no modo Edit (opcional, com Rojo conectado):
   teoria (alinhado ao risco 10 do doc; revisar antes de matchmaking público).
 - **Colocação usa mouse**; em touch funciona por tap, mas sem UX dedicada de mobile (passo 10).
 - **Inimigo é MoveTo direto** (sem PathfindingService); pode travar em quina fora do funil — aceito
-  pelo doc 4.8.
+  pelo doc 4.8. Barricada "quebrada" (Carpinteiro fortificado, Seção 3.2) mantém colisão física
+  pra continuar obstruindo, mesma classe de risco (obstáculo sólido sem pathfinding real).
+- **Custos/preços do Carpinteiro são todos placeholder** (fortificar 8 madeira, reparar 6 madeira,
+  passivas 60 moeda cada, hold de reparo 5s/2.5s, cooldown de craft do Carpinteiro) — ajustar
+  junto com o resto da Seção 7 no playtest do passo 10.

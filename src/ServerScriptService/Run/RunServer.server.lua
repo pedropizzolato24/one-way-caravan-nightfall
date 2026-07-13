@@ -22,6 +22,7 @@ local ZoneBuilder = require(Shared.ZoneBuilder)
 local RouteGraph = require(Shared.RouteGraph)
 local ProfileManager = require(Shared.ProfileManager)
 local Places = require(Shared.Places)
+local Classes = require(Shared.Classes) -- Seção 3.2 item 1: efeitos de gameplay do Carpinteiro
 
 -- ===== config =====
 local DAY_LENGTH = 90 -- janela de dia livre pós-noite: se ficarem no POI até acabar, a noite volta
@@ -79,12 +80,26 @@ local BARRICADE_REINFORCED_HP = 400
 local BARRICADE_COLOR = Color3.fromRGB(140, 100, 50)
 local BARRICADE_REINFORCED_COLOR = Color3.fromRGB(96, 84, 70)
 local BARRICADE_COLOR_BROKEN = Color3.fromRGB(70, 45, 25)
+local BARRICADE_COLOR_FORTIFIED_TINT = Color3.fromRGB(120, 130, 145) -- leve tom metálico quando fortificada
 -- itens de catálogo (doc 5.2): a COMPRA vive no LobbyServer; aqui a tabela só diz quais
 -- construções exigem o unlock Unlock_<id> no perfil (gate do placeRE)
 local CATALOG = {
 	BarricadaReforcada = { name = "Barricada Reforçada", price = 40 },
 }
-local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5 } -- doc 4.1
+local RATE_LIMIT = { Collect = 0.3, Damage = 0.2, Place = 0.5, Eat = 0.5, Convert = 0.5 } -- doc 4.1
+
+-- ===== Seção 3.2 item 1 (doc 5.6): Carpinteiro — fortificar/reparar barricada, converter recurso =====
+local FORTIFY_WOOD_COST = 8 -- [PLACEHOLDER] ação exclusiva; ajustar em playtest
+local REPAIR_WOOD_COST = 6 -- [PLACEHOLDER]
+local REPAIR_HOLD_NORMAL = 5 -- segundos [PLACEHOLDER] — "qualquer um" repara, mais devagar
+local REPAIR_HOLD_CARPINTEIRO = 2 -- segundos [PLACEHOLDER] — passiva "reparo rápido"
+local CARPINTEIRO_PLACE_RATE = 0.25 -- [PLACEHOLDER] passiva "craft rápido": cooldown de construção menor
+local CONVERT_WOOD_COST = 3 -- doc Seção 7: taxa 3:1 [PLACEHOLDER de playtest]
+local CONVERT_FOOD_GAIN = 1
+
+local function isCarpinteiro(plr)
+	return plr:GetAttribute("SelectedClass") == "Carpinteiro"
+end
 
 -- zona atual (funil, posições da caravana); preenchida pelo loop da run
 local CurrentZone = nil
@@ -123,7 +138,10 @@ local enemyDiedRE = ensureRemote("EnemyDied")
 local playerDownedRE = ensureRemote("PlayerDowned")
 local announceRE = ensureRemote("Announce")
 local runEndedRE = ensureRemote("RunEnded")
+local convertRE = ensureRemote("ConvertResource") -- Seção 3.2: ação exclusiva do Carpinteiro
 ensureRemote("BuyUnlock") -- catálogo é compra de LOBBY (doc 5.2): aqui existe só pro cliente compartilhado não travar em WaitForChild; sem handler
+ensureRemote("SelectClass") -- escolha de classe é compra de LOBBY (doc 4.2): idem, sem handler aqui
+ensureRemote("BuyPassive") -- idem
 
 local function ensureFolder(name)
 	local f = workspace:FindFirstChild(name)
@@ -254,14 +272,15 @@ end
 
 -- ===== rate limit =====
 local lastCall = {} -- [player][key] = os.clock()
-local function rateOk(plr, key)
+-- cooldown opcional (Seção 3.2: passiva "craft rápido" do Carpinteiro reduz o de "Place")
+local function rateOk(plr, key, cooldownOverride)
 	local now = os.clock()
 	local t = lastCall[plr]
 	if not t then
 		t = {}
 		lastCall[plr] = t
 	end
-	if now - (t[key] or 0) < RATE_LIMIT[key] then
+	if now - (t[key] or 0) < (cooldownOverride or RATE_LIMIT[key]) then
 		return false
 	end
 	t[key] = now
@@ -653,20 +672,103 @@ local function attackReady(e)
 	return true
 end
 
+-- tinge o corpo pela vida restante; barricada fortificada ganha um leve tom metálico (feedback visual)
+local function setBarricadeVisual(barr, hp, maxHp)
+	local body = barr.PrimaryPart
+	if not body then return end
+	local baseColor = barr:GetAttribute("BaseColor") or BARRICADE_COLOR
+	local color = BARRICADE_COLOR_BROKEN:Lerp(baseColor, math.clamp(hp / maxHp, 0, 1))
+	if barr:GetAttribute("Fortified") then
+		color = color:Lerp(BARRICADE_COLOR_FORTIFIED_TINT, 0.35)
+	end
+	body.Color = color
+end
+
+-- doc Seção 2: barricada fortificada, ao ser destruída, vira "quebrada" (não bloqueia mais o
+-- funil — a IA para de brigar com ela — mas o corpo físico segue no lugar) em vez de sumir.
+-- Reparável por QUALQUER jogador; Carpinteiro repara mais rápido (Seção 3.2, passiva "reparo rápido").
+local function makeRepairPrompt(barr)
+	local body = barr.PrimaryPart
+	if not body then return end
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "RepararPrompt"
+	prompt.ActionText = "Reparar (" .. REPAIR_WOOD_COST .. " madeira)"
+	prompt.ObjectText = "Barricada quebrada"
+	prompt.HoldDuration = REPAIR_HOLD_NORMAL
+	prompt.RequiresLineOfSight = false
+	prompt.MaxActivationDistance = 8
+	prompt.Parent = body
+	-- ajusta o tempo de segurar ANTES da contagem começar (por jogador): mais rápido pro Carpinteiro
+	prompt.PromptButtonHoldBegan:Connect(function(plr)
+		prompt.HoldDuration = isCarpinteiro(plr) and REPAIR_HOLD_CARPINTEIRO or REPAIR_HOLD_NORMAL
+	end)
+	prompt.Triggered:Connect(function(plr)
+		local r = resources[plr]
+		if not r or (r.Wood or 0) < REPAIR_WOOD_COST then
+			announceRE:FireClient(plr, "Precisa de " .. REPAIR_WOOD_COST .. " de madeira pra reparar.")
+			return
+		end
+		r.Wood -= REPAIR_WOOD_COST
+		plr:SetAttribute("Wood", r.Wood)
+		local maxHp = barr:GetAttribute("MaxHP") or BARRICADE_HP
+		barr:SetAttribute("HP", maxHp)
+		barr:SetAttribute("IsBarricade", true) -- volta a bloquear o funil de verdade
+		barr:SetAttribute("IsBroken", false)
+		setBarricadeVisual(barr, maxHp, maxHp)
+		prompt:Destroy()
+		announce(plr.Name .. " reparou uma barricada quebrada.")
+	end)
+end
+
+-- Seção 3.2 (doc 5.6): ação EXCLUSIVA do Carpinteiro com a passiva "Fortificar" desbloqueada.
+-- Prompt existe em toda barricada (feedback pra quem não tem a passiva ainda), validado no server.
+local function makeFortifyPrompt(barr)
+	local body = barr.PrimaryPart
+	if not body then return end
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "FortificarPrompt"
+	prompt.ActionText = "Fortificar (" .. FORTIFY_WOOD_COST .. " madeira)"
+	prompt.ObjectText = "Ação do Carpinteiro"
+	prompt.HoldDuration = 1.5
+	prompt.RequiresLineOfSight = false
+	prompt.MaxActivationDistance = 8
+	prompt.Parent = body
+	prompt.Triggered:Connect(function(plr)
+		if not (isCarpinteiro(plr) and ProfileManager.isPassiveUnlocked(plr, "Carpinteiro", "Fortificar")) then
+			announceRE:FireClient(plr, "Só o Carpinteiro com a passiva Fortificar pode fazer isso.")
+			return
+		end
+		local r = resources[plr]
+		if not r or (r.Wood or 0) < FORTIFY_WOOD_COST then
+			announceRE:FireClient(plr, "Precisa de " .. FORTIFY_WOOD_COST .. " de madeira pra fortificar.")
+			return
+		end
+		r.Wood -= FORTIFY_WOOD_COST
+		plr:SetAttribute("Wood", r.Wood)
+		barr:SetAttribute("Fortified", true)
+		setBarricadeVisual(barr, barr:GetAttribute("HP") or 0, barr:GetAttribute("MaxHP") or BARRICADE_HP)
+		prompt:Destroy()
+		announce(plr.Name .. " fortificou uma barricada.")
+	end)
+end
+
 local function tryAttackBarricade(e, barr)
 	if not attackReady(e) then return end
 	local dmg = e:GetAttribute("BarricadeDmg") or ENEMY_DMG_BARRICADE
 	local maxHp = barr:GetAttribute("MaxHP") or BARRICADE_HP
-	local hp = (barr:GetAttribute("HP") or 0) - dmg
+	local hp = math.max((barr:GetAttribute("HP") or 0) - dmg, 0)
 	barr:SetAttribute("HP", hp)
-	local body = barr.PrimaryPart
-	if body then
-		local baseColor = barr:GetAttribute("BaseColor") or BARRICADE_COLOR
-		body.Color = BARRICADE_COLOR_BROKEN:Lerp(baseColor, math.clamp(hp / maxHp, 0, 1))
-	end
+	setBarricadeVisual(barr, hp, maxHp)
 	if hp <= 0 then
-		print("[One Way Caravan: Nightfall] Barricada destruida — caminho aberto")
-		barr:Destroy() -- doc Seção 2: sem fortificação, barricada destruída some
+		if barr:GetAttribute("Fortified") then
+			barr:SetAttribute("IsBarricade", false) -- não bloqueia mais o funil; a IA segue em frente
+			barr:SetAttribute("IsBroken", true)
+			print("[One Way Caravan: Nightfall] Barricada fortificada quebrou — reparável por qualquer um")
+			makeRepairPrompt(barr)
+		else
+			print("[One Way Caravan: Nightfall] Barricada destruida — caminho aberto")
+			barr:Destroy() -- doc Seção 2: sem fortificação, barricada destruída some
+		end
 	end
 end
 
@@ -853,6 +955,9 @@ local function buildStructure(structType, groundPos, lookDir)
 		m.PrimaryPart = base
 	end
 	m.Parent = structuresFolder
+	if isBarricade then
+		makeFortifyPrompt(m) -- Seção 3.2: prompt existe em toda barricada, ação gated no servidor
+	end
 	return m
 end
 
@@ -911,7 +1016,8 @@ damageRE.OnServerEvent:Connect(function(plr)
 end)
 
 placeRE.OnServerEvent:Connect(function(plr, structType, pos)
-	if not rateOk(plr, "Place") then return end
+	-- Seção 3.2 (Carpinteiro, passiva base "craft rápido"): cooldown de construção menor
+	if not rateOk(plr, "Place", isCarpinteiro(plr) and CARPINTEIRO_PLACE_RATE or nil) then return end
 	if plr:GetAttribute("Downed") then return end
 	if type(structType) ~= "string" or typeof(pos) ~= "Vector3" then return end
 	local cost = COSTS[structType]
@@ -954,6 +1060,19 @@ eatRE.OnServerEvent:Connect(function(plr)
 	r.Food -= 1
 	plr:SetAttribute("Food", r.Food)
 	hum.Health = math.min(hum.MaxHealth, hum.Health + HEAL_PER_FOOD)
+end)
+
+-- Seção 3.2 (doc 5.6): ação exclusiva do Carpinteiro com a passiva "Conversão de Recurso"
+convertRE.OnServerEvent:Connect(function(plr)
+	if not rateOk(plr, "Convert") then return end
+	if plr:GetAttribute("Downed") then return end
+	if not (isCarpinteiro(plr) and ProfileManager.isPassiveUnlocked(plr, "Carpinteiro", "ConversaoRecurso")) then return end
+	local r = resources[plr]
+	if not r or (r.Wood or 0) < CONVERT_WOOD_COST then return end
+	r.Wood -= CONVERT_WOOD_COST
+	r.Food = (r.Food or 0) + CONVERT_FOOD_GAIN
+	plr:SetAttribute("Wood", r.Wood)
+	plr:SetAttribute("Food", r.Food)
 end)
 
 -- (sem handler de BuyUnlock aqui: catálogo é compra de LOBBY, doc 5.2 — ver LobbyServer)
