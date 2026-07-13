@@ -93,6 +93,12 @@ local RunWorld = nil
 -- estado da run: active liga a checagem de wipe; defeated interrompe as fases
 local runState = { active = false, defeated = false }
 
+-- num reserved server o grupo teleporta pra cá e o character carregaria na origem ANTES do
+-- buildWorld terminar (spawn no void). Seguramos o spawn até o mundo existir: CharacterAutoLoads
+-- off no boot, e o loop libera + dá LoadCharacter em quem chegar depois que worldReady vira true.
+Players.CharacterAutoLoads = false
+local worldReady = false
+
 -- ===== infraestrutura (cria o que faltar p/ o servidor nunca travar em WaitForChild) =====
 local remotes = RS:FindFirstChild("Remotes")
 if not remotes then
@@ -228,6 +234,15 @@ local function initPlayer(plr)
 	task.spawn(function()
 		ProfileManager.load(plr) -- perfil persistente (doc 4.4); atributos ProfileCurrency/Unlock_* espelham pro cliente
 	end)
+	-- chegou depois do mundo pronto (o caso normal do teleporte): spawna já no POI atual.
+	-- Antes disso o loop faz o LoadCharacter em quem já está presente (ver worldReady).
+	if worldReady and not plr.Character then
+		task.spawn(function()
+			pcall(function()
+				plr:LoadCharacter()
+			end)
+		end)
+	end
 end
 
 local function addResource(plr, kind, amt)
@@ -1266,7 +1281,8 @@ task.spawn(function()
 		RS:SetAttribute("EnemiesAlive", 0)
 		applyDayAmbience()
 		Lighting.ClockTime = 12
-		resetPlayersForNewRun() -- respawna quem já está aqui (rodada standalone) no novo mundo
+		worldReady = true -- mundo existe: libera o spawn (quem chegar depois spawna via initPlayer)
+		resetPlayersForNewRun() -- respawna quem já está aqui (chegou durante o build, ou standalone)
 
 		-- espera o grupo do teleporte chegar (os jogadores entram escalonados nos primeiros
 		-- segundos do reserved server); servidor vazio fica em espera até a plataforma reciclar

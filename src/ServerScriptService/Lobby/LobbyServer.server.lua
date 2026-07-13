@@ -13,6 +13,10 @@ local ZoneBuilder = require(Shared.ZoneBuilder)
 local ProfileManager = require(Shared.ProfileManager)
 local Places = require(Shared.Places)
 
+-- segura o spawn até o posto existir (evita o 1º jogador spawnar na origem antes do buildLobby)
+Players.CharacterAutoLoads = false
+local lobbyReady = false
+
 -- catálogo lateral (doc 5.2; mesma tabela do RunServer — o preço só é cobrado aqui)
 local CATALOG = {
 	BarricadaReforcada = { name = "Barricada Reforçada", price = 40 },
@@ -66,6 +70,13 @@ local function initPlayer(plr)
 	task.spawn(function()
 		ProfileManager.load(plr) -- atributos ProfileCurrency/Unlock_* espelham pro cliente
 	end)
+	if lobbyReady and not plr.Character then
+		task.spawn(function()
+			pcall(function()
+				plr:LoadCharacter()
+			end)
+		end)
+	end
 end
 
 Players.PlayerAdded:Connect(initPlayer)
@@ -156,6 +167,18 @@ ZoneBuilder.buildCaravana()
 local lobby = ZoneBuilder.buildLobby()
 ZoneBuilder.pivotCaravanaTo(lobby.caravanaCf)
 ZoneBuilder.setCaravanaLocked(false) -- posto murado: dá pra treinar a pilotagem sem risco
+
+-- posto pronto: libera o spawn e materializa quem já estava aqui (chegou durante o build)
+lobbyReady = true
+for _, plr in ipairs(Players:GetPlayers()) do
+	if not plr.Character then
+		task.spawn(function()
+			pcall(function()
+				plr:LoadCharacter()
+			end)
+		end)
+	end
+end
 announce("Lobby: gastem a moeda no catálogo (painel à direita) e segurem o poste de partida quando estiverem prontos.")
 
 local prompt = Instance.new("ProximityPrompt")
