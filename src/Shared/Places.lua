@@ -7,6 +7,6 @@
 -- o LobbyServer avisa que falta configurar, e o RunServer reinicia a run no mesmo servidor
 -- ao fim (é também o que mantém tudo testável no Studio, onde TeleportService não funciona).
 return {
-	LOBBY = 0,
-	RUN = 0,
+	LOBBY = 96962695773747,
+	RUN = 80646019425233,
 }
