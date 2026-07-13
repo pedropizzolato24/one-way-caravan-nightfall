@@ -6,21 +6,32 @@ junto no mesmo servidor.
 
 ## Status
 
-**O lado de código (mudanças 2–5) está IMPLEMENTADO** neste repositório. O que falta são as
-etapas que só dá pra fazer no Studio/Creator Dashboard (mudanças 1 e 6):
+**Mudanças 1–5 concluídas. Falta só a 6** (republicar depois dos últimos fixes e confirmar o
+fluxo publicado ponta a ponta):
 
 | # | Mudança | Status |
 |---|---------|--------|
-| 1 | Criar o place Run na Experience + preencher `Places.lua` | **PENDENTE (manual)** |
+| 1 | Criar o place Run na Experience + preencher `Places.lua` | **Feito** (IDs preenchidos) |
 | 2 | Módulos compartilhados em `src/Shared/` | Feito |
 | 3 | Split em `LobbyServer` / `RunServer` | Feito |
 | 4 | `ReserveServer` + `TeleportAsync` nas duas pontas | Feito |
 | 5 | Dois projetos Rojo (`lobby.project.json` / `run.project.json`) | Feito |
 | 6 | Publicar os dois places e testar ponta a ponta | **PENDENTE (manual)** |
 
-Enquanto 1 e 6 não acontecem, **tudo continua testável**: com `Places.lua` zerado cada place
-roda em modo standalone — o Run começa uma run direto no Play e a reinicia no fim; o Lobby
-funciona inteiro e avisa que o teleporte não está configurado ao segurar o poste.
+O que falta na mudança 6, concretamente:
+1. `git pull` na branch e **re-sync do Rojo nos dois places** — houve fixes depois do primeiro
+   publish (limpeza de scripts legados/contaminação no `setup_place.lua`, e o hardening de spawn
+   que segura o character até o mundo existir). Sem re-sync + republish, o servidor publicado
+   roda a versão antiga.
+2. Rodar `setup_place.lua` na Command Bar de cada place (depois de conectar o Rojo — ele agora
+   se auto-limpa, inclusive removendo o server-script do outro place se veio por engano).
+3. **Publish** dos dois places.
+4. Testar no cliente Roblox (não no Studio) com 2+ contas: lobby → segurar poste → grupo cai no
+   mesmo servidor de run → jogar → volta pro lobby com a moeda creditada.
+
+Até a 6 fechar de verdade no publicado, **tudo continua testável isolado**: cada place roda
+standalone com Play no Studio (o Run começa uma run direto; o Lobby roda catálogo + caravana e
+só o teleporte fica indisponível — `TeleportAsync` sempre falha no Studio, por design).
 
 ## O que foi implementado (mapa do código)
 
