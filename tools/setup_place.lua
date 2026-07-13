@@ -34,6 +34,31 @@ for _, n in ipairs({ "OneWayCaravanNightfallServer", "ZoneBuilder", "RouteGraph"
 		print("[setup] Script legado removido de ServerScriptService: " .. n)
 	end
 end
+
+-- CONTAMINAÇÃO CRUZADA: se o plugin Rojo conectou na porta do OUTRO place (erro fácil de
+-- cometer), o server-script errado foi sincronizado aqui e rodaria junto com o certo. Identifica
+-- o place pelo PlaceId (Shared.Places) e remove o script que não pertence. Rode o setup DEPOIS
+-- de conectar o Rojo, pra o Shared já existir. Se os IDs ainda estão 0, não faz nada.
+local okPlaces, Places = pcall(function()
+	return require(SSS.Shared.Places)
+end)
+if okPlaces then
+	local wrong
+	if game.PlaceId == Places.LOBBY and Places.LOBBY ~= 0 then
+		wrong = "RunServer"
+	elseif game.PlaceId == Places.RUN and Places.RUN ~= 0 then
+		wrong = "LobbyServer"
+	end
+	if wrong then
+		local x = SSS:FindFirstChild(wrong)
+		if x then
+			x:Destroy()
+			print("[setup] Script do OUTRO place removido (sync na porta errada?): " .. wrong)
+		end
+	end
+else
+	print("[setup] Aviso: Shared.Places não encontrado — conecte o Rojo antes de rodar o setup.")
+end
 local old = game.ReplicatedStorage:FindFirstChild("Remotes")
 if old then old:Destroy() end
 old = game.StarterPack:FindFirstChild("Machado")
